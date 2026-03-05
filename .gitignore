@@ -8,3 +8,4 @@ build/
 .pytest_cache/
 *.log
 .claude/
+.DS_Store
