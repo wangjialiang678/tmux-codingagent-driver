@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import subprocess
 import sys
 import time
 
@@ -35,8 +37,21 @@ def _get_tmux() -> TmuxAdapter:
 
 
 @click.group()
-def cli():
+@click.option("-v", "--verbose", count=True, help="Increase verbosity (-v=INFO, -vv=DEBUG).")
+def cli(verbose: int):
     """tcd — tmux-codingagent-driver: Drive AI CLI tools via tmux."""
+    # Configure logging: default=WARNING, -v=INFO, -vv=DEBUG
+    level = logging.WARNING
+    if verbose >= 2:
+        level = logging.DEBUG
+    elif verbose >= 1:
+        level = logging.INFO
+    logging.basicConfig(
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+        level=level,
+        stream=sys.stderr,
+    )
     ensure_dirs()
 
 
@@ -52,7 +67,18 @@ def cli():
 @click.option("--model", default=None, help="Model name override.")
 @click.option("--timeout", default=60, type=int, help="Timeout in minutes.")
 @click.option("--sandbox", default=None, help="Codex sandbox mode.")
-def start(provider: str, prompt: str, cwd: str, model: str | None, timeout: int, sandbox: str | None):
+@click.option("--worktree", is_flag=True, default=False, help="Run in a git worktree for isolation.")
+@click.option("--wt-name", default=None, help="Custom worktree branch name (default: job ID).")
+def start(
+    provider: str,
+    prompt: str,
+    cwd: str,
+    model: str | None,
+    timeout: int,
+    sandbox: str | None,
+    worktree: bool,
+    wt_name: str | None,
+):
     """Start a new AI job."""
     tmux = _get_tmux()
 
@@ -81,9 +107,46 @@ def start(provider: str, prompt: str, cwd: str, model: str | None, timeout: int,
             click.echo(f"Error: {e}", err=True)
             sys.exit(1)
 
+    if worktree:
+        from tcd.worktree import is_git_repo
+
+        if not is_git_repo(cwd):
+            click.echo("Error: cwd is not a git repository.", err=True)
+            sys.exit(1)
+
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+        )
+        if status.stdout.strip():
+            click.echo("Error: uncommitted changes in working directory.", err=True)
+            sys.exit(1)
+
     # Create job
     mgr = JobManager()
     job = mgr.create_job(provider, prompt, cwd, model=model, timeout_minutes=timeout, sandbox=sandbox)
+    logger.info("start %s: provider=%s cwd=%s sandbox=%s worktree=%s", job.id, provider, cwd, sandbox, worktree)
+
+    if worktree:
+        from tcd.worktree import WorktreeError, create_worktree
+
+        name = wt_name or job.id
+        try:
+            wt_path = create_worktree(cwd, name)
+        except WorktreeError as e:
+            click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+
+        cwd = str(wt_path)
+        job.cwd = cwd
+        job.worktree_path = cwd
+        job.worktree_branch = f"tcd/{name}"
+        mgr.save_job(job)
+        logger.info("start %s: worktree created at %s branch=tcd/%s", job.id, cwd, name)
+        emit(job.id, "job.worktree_created", worktree_path=cwd, branch=f"tcd/{name}")
+
     emit(job.id, "job.created", provider=provider, sandbox=sandbox, cwd=cwd, model=model)
 
     # Build and launch
@@ -141,8 +204,10 @@ def start(provider: str, prompt: str, cwd: str, model: str | None, timeout: int,
         time.sleep(2)
     elapsed_ms = int((time.time() - tui_wait_started) * 1000)
     if tui_ready:
+        logger.info("start %s: TUI ready in %dms (trust_handled=%s)", job.id, elapsed_ms, trust_handled)
         emit(job.id, "job.tui_ready", elapsed_ms=elapsed_ms, trust_handled=trust_handled)
     else:
+        logger.warning("start %s: TUI not ready after %dms, proceeding anyway (trust_handled=%s)", job.id, elapsed_ms, trust_handled)
         emit(job.id, "job.tui_timeout", elapsed_ms=elapsed_ms, trust_handled=trust_handled)
 
     # Inject prompt
@@ -155,6 +220,7 @@ def start(provider: str, prompt: str, cwd: str, model: str | None, timeout: int,
         mgr.save_job(job)
         click.echo("Error: failed to send initial prompt to tmux session.", err=True)
         sys.exit(1)
+    logger.info("start %s: prompt sent (%d bytes, req_id=%s)", job.id, len(wrapped.encode("utf-8")), req_id)
     emit(job.id, "job.prompt_sent", bytes=len(wrapped.encode("utf-8")), req_id=req_id)
 
     click.echo(f"Job started: {job.id}")
@@ -206,7 +272,9 @@ def status(job_id: str, as_json: bool):
 @click.argument("job_id")
 @click.option("--full", is_flag=True, help="Full scrollback output.")
 @click.option("--raw", is_flag=True, help="Raw output (no ANSI cleaning).")
-def output(job_id: str, full: bool, raw: bool):
+@click.option("--tail", type=int, default=None, help="Show only last N lines.")
+@click.option("--since-line", type=int, default=None, help="Show lines after line N (for incremental polling).")
+def output(job_id: str, full: bool, raw: bool, tail: int | None, since_line: int | None):
     """Get job output."""
     mgr = JobManager()
     job = mgr.load_job(job_id)
@@ -223,8 +291,20 @@ def output(job_id: str, full: bool, raw: bool):
         result = collector.collect(job)
 
     if result:
-        click.echo(result)
+        lines = result.splitlines()
+        total = len(lines)
+        if since_line is not None:
+            logger.debug("output %s: total=%d since_line=%d showing=%d", job_id, total, since_line, len(lines[since_line:]))
+            lines = lines[since_line:]
+        elif tail is not None:
+            logger.debug("output %s: total=%d tail=%d", job_id, total, tail)
+            lines = lines[-tail:]
+        click.echo("\n".join(lines))
+        # Print total line count to stderr for callers to track position
+        if since_line is not None or tail is not None:
+            click.echo(f"__lines_total={total}", err=True)
     else:
+        logger.debug("output %s: no output available", job_id)
         click.echo("(no output available)", err=True)
 
 
@@ -306,6 +386,7 @@ def check(job_id: str, as_json: bool):
                     job.last_agent_message = result.last_agent_message
                 _accumulate_tokens(job, result.tokens)
                 mgr.save_job(job)
+                logger.info("check %s: state=idle turn=%d elapsed=%ds", job.id, completed_turn, _elapsed(job))
                 emit(job.id, "job.checked", state="idle")
                 emit(job.id, "job.turn_complete", turn=completed_turn, **({"tokens": result.tokens} if result.tokens else {}))
                 state = "idle"
@@ -316,6 +397,7 @@ def check(job_id: str, as_json: bool):
                 job.turn_state = "context_limit"
                 _accumulate_tokens(job, result.tokens)
                 mgr.save_job(job)
+                logger.warning("check %s: context_limit reached at turn=%d elapsed=%ds", job.id, completed_turn, _elapsed(job))
                 emit(job.id, "job.checked", state="context_limit")
                 emit(job.id, "job.turn_complete", turn=completed_turn, **({"tokens": result.tokens} if result.tokens else {}))
                 state = "context_limit"
@@ -326,10 +408,17 @@ def check(job_id: str, as_json: bool):
 
     if as_json:
         pane_tail = ""
+        activity_lines: list[str] = []
         try:
-            pane = TmuxAdapter().capture_pane(job.tmux_session)
+            tmux = TmuxAdapter()
+            pane = tmux.capture_pane(job.tmux_session)
             if pane:
                 pane_tail = "\n".join(pane.splitlines()[-5:])
+            # Grab more scrollback to extract meaningful activity
+            scrollback = tmux.capture_pane(job.tmux_session, start_line="-200")
+            if scrollback:
+                activity_lines = _extract_activity_lines(scrollback)
+                logger.debug("check %s: extracted %d activity lines from scrollback", job.id, len(activity_lines))
         except Exception:
             logger.exception("Failed to capture pane for diagnostics for job %s", job.id)
 
@@ -345,6 +434,7 @@ def check(job_id: str, as_json: bool):
                         for w in diag_warnings
                     ],
                     "pane_tail": pane_tail,
+                    "activity": activity_lines,
                 },
                 ensure_ascii=False,
             )
@@ -466,6 +556,7 @@ def send(job_id: str, message: str | None, file_path: str | None):
         mgr.save_job(job)
         click.echo("Error: failed to send message to tmux session.", err=True)
         sys.exit(1)
+    logger.info("send %s: message sent (%d bytes, turn=%d, req_id=%s)", job.id, len(wrapped.encode("utf-8")), job.turn_count, req_id)
     emit(
         job.id,
         "job.message_sent",
@@ -562,6 +653,53 @@ def kill(job_id: str | None, kill_all: bool):
 
 
 # ---------------------------------------------------------------------------
+# tcd merge
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.argument("job_id")
+@click.option("--squash", is_flag=True, default=False, help="Squash merge.")
+@click.option("--no-cleanup", is_flag=True, default=False, help="Don't remove worktree after merge.")
+def merge(job_id: str, squash: bool, no_cleanup: bool):
+    """Merge a worktree job's branch back to main."""
+    mgr = JobManager()
+    job = mgr.load_job(job_id)
+    if job is None:
+        click.echo(f"Error: Job {job_id!r} not found.", err=True)
+        sys.exit(1)
+    if not job.worktree_branch:
+        click.echo(f"Error: Job {job_id} has no worktree.", err=True)
+        sys.exit(1)
+
+    from tcd.worktree import delete_branch, get_repo_root, merge_branch, remove_worktree
+
+    repo_root = get_repo_root(job.cwd)
+    strategy = "squash" if squash else "merge"
+    logger.info("merge %s: merging branch=%s strategy=%s", job.id, job.worktree_branch, strategy)
+    success = merge_branch(repo_root, job.worktree_branch, strategy=strategy)
+
+    if not success:
+        logger.warning("merge %s: conflict on branch=%s", job.id, job.worktree_branch)
+        click.echo(f"Merge conflict on {job.worktree_branch}. Resolve manually.", err=True)
+        emit(job.id, "job.worktree_merged", success=False, strategy=strategy)
+        sys.exit(1)
+
+    logger.info("merge %s: success, cleanup=%s", job.id, not no_cleanup)
+    click.echo(f"Merged {job.worktree_branch} ({strategy}).")
+
+    if not no_cleanup and job.worktree_path:
+        remove_worktree(job.worktree_path)
+        delete_branch(repo_root, job.worktree_branch)
+        emit(job.id, "job.worktree_removed", worktree_path=job.worktree_path)
+        job.worktree_path = None
+        job.worktree_branch = None
+        mgr.save_job(job)
+        click.echo("Worktree cleaned up.")
+
+    emit(job.id, "job.worktree_merged", success=True, strategy=strategy)
+
+
+# ---------------------------------------------------------------------------
 # tcd clean
 # ---------------------------------------------------------------------------
 
@@ -589,8 +727,10 @@ def _refresh_status(job: Job, mgr: JobManager) -> None:
         if job.turn_state == "working":
             job.status = "failed"
             job.error = job.error or "tmux session disappeared while turn was working"
+            logger.warning("refresh %s: tmux session gone while working, marking failed", job.id)
         else:
             job.status = "completed"
+            logger.info("refresh %s: tmux session gone (idle), marking completed", job.id)
         job.completed_at = _now_iso()
         mgr.save_job(job)
 
@@ -609,12 +749,22 @@ def _accumulate_tokens(job: Job, tokens: dict[str, int] | None) -> None:
 
 
 def _kill_job(job: Job, tmux: TmuxAdapter, mgr: JobManager) -> None:
+    logger.info("kill %s: killing job (provider=%s, elapsed=%ds)", job.id, job.provider, _elapsed(job))
     if tmux.session_exists(job.tmux_session):
         tmux.kill_session(job.tmux_session)
     job.status = "failed"
     job.error = "killed by user"
     job.completed_at = _now_iso()
     mgr.save_job(job)
+    if job.worktree_path:
+        try:
+            from tcd.worktree import remove_worktree
+
+            remove_worktree(job.worktree_path)
+            logger.info("kill %s: worktree removed at %s", job.id, job.worktree_path)
+            emit(job.id, "job.worktree_removed", worktree_path=job.worktree_path)
+        except Exception:
+            logger.warning("kill %s: failed to remove worktree at %s", job.id, job.worktree_path, exc_info=True)
     emit(job.id, "job.killed", reason="user")
 
 
@@ -629,6 +779,39 @@ def _format_event_line(entry: dict) -> str:
     if parts:
         return f"{ts} {event} " + " ".join(parts)
     return f"{ts} {event}"
+
+
+# Patterns that indicate meaningful Codex activity (not TUI chrome)
+_ACTIVITY_PATTERNS = re.compile(
+    r"^[•\-\*]\s|"                     # bullet points (Codex action summaries)
+    r"^\s*(Edited|Created|Read|Ran |Deleted|Moved|Searched|Explored|Wrote)\b|"
+    r"^\s*[✓✗✔✘⚠]|"                  # status indicators
+    r"passed|failed|error|PASS|FAIL|"  # test results
+    r"^\d+\s+(passed|failed)|"         # pytest summary
+    r"Worked for "                      # Codex timing
+)
+
+
+def _extract_activity_lines(scrollback: str, max_lines: int = 15) -> list[str]:
+    """Extract meaningful activity lines from Codex scrollback.
+
+    Filters out TUI chrome, empty lines, and status bar to surface
+    actual work: file operations, test results, and action summaries.
+    """
+    lines = scrollback.splitlines()
+    result = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Skip TUI chrome
+        if stripped.startswith(("›", "gpt-", "─")):
+            continue
+        if _ACTIVITY_PATTERNS.search(stripped):
+            result.append(stripped)
+    matched = result[-max_lines:]
+    logger.debug("_extract_activity_lines: %d input lines, %d matched, returning %d", len(lines), len(result), len(matched))
+    return matched
 
 
 def _elapsed(job: Job) -> int:

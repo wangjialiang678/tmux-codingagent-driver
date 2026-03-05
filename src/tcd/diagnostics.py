@@ -55,7 +55,7 @@ def diagnose(job: Job, pane_tail: str | None = None) -> list[Warning]:
 
     # R1: Sandbox mismatch
     try:
-        if job.sandbox in (None, "workspace-write"):
+        if job.sandbox in ("workspace-write", "workspace-read"):
             prompt_lower = (job.prompt or "").lower()
             if any(keyword in prompt_lower for keyword in _WRITE_INTENT_KEYWORDS):
                 warnings.append(
@@ -63,7 +63,7 @@ def diagnose(job: Job, pane_tail: str | None = None) -> list[Warning]:
                         code="SANDBOX_MISMATCH",
                         message=(
                             "Prompt contains write intent but "
-                            f"sandbox={job.sandbox or 'workspace-write'}"
+                            f"sandbox={job.sandbox}"
                         ),
                         severity="warn",
                     )

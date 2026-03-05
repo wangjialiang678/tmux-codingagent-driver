@@ -56,15 +56,23 @@ def test_diagnose_empty_events_and_no_pane_returns_empty(monkeypatch):
 
 def test_r1_sandbox_mismatch_triggers(monkeypatch):
     _no_events(monkeypatch)
-    job = _job(sandbox=None, prompt="Please fix this bug")
+    job = _job(sandbox="workspace-write", prompt="Please fix this bug")
 
     warnings = diagnose(job)
     assert any(w.code == "SANDBOX_MISMATCH" for w in warnings)
 
 
-def test_r1_sandbox_mismatch_not_triggered(monkeypatch):
+def test_r1_sandbox_mismatch_not_triggered_full_access(monkeypatch):
     _no_events(monkeypatch)
     job = _job(sandbox="danger-full-access", prompt="Please fix this bug")
+
+    warnings = diagnose(job)
+    assert not any(w.code == "SANDBOX_MISMATCH" for w in warnings)
+
+
+def test_r1_sandbox_mismatch_not_triggered_default(monkeypatch):
+    _no_events(monkeypatch)
+    job = _job(sandbox=None, prompt="Please fix this bug")
 
     warnings = diagnose(job)
     assert not any(w.code == "SANDBOX_MISMATCH" for w in warnings)

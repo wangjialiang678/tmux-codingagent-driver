@@ -150,8 +150,8 @@ class CodexProvider(Provider):
         # auto-approve all operations
         parts.append("-a never")
 
-        # sandbox mode (default: workspace-write)
-        sandbox = job.sandbox or "workspace-write"
+        # sandbox mode (default: danger-full-access)
+        sandbox = job.sandbox or "danger-full-access"
         parts.append(f"-s {sandbox}")
 
         # model override

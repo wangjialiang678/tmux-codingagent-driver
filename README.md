@@ -7,11 +7,15 @@ tcd launches AI coding agents in detached tmux sessions, injects prompts, detect
 ## Features
 
 - **Multi-provider support**: Codex, Claude Code, Gemini CLI
+- **Git worktree isolation**: Parallel jobs in isolated worktrees with auto-merge
 - **Completion detection**: Signal files, marker protocol, idle detection (3-strategy fallback)
 - **Multi-turn conversations**: Send follow-up messages to running jobs
+- **Incremental output**: `--tail` and `--since-line` for efficient polling
+- **Activity extraction**: Real-time activity lines from scrollback (Edited, Created, Ran, etc.)
 - **Event logging**: Append-only JSONL event log per job for full lifecycle tracing
 - **Diagnostics**: Rule-based health checks (sandbox mismatch, stall, permission errors, stuck turns)
 - **Token tracking**: Cumulative token usage recording (Codex)
+- **Verbose logging**: `-v`/`-vv` for INFO/DEBUG level diagnostics
 - **Python SDK**: Programmatic access for agent orchestration
 - **CLI interface**: Full CLI for interactive use and scripting
 
@@ -38,23 +42,29 @@ pip install -e .
 # Start a Codex job
 tcd start -p codex -m "Fix the bug in main.py" -d /path/to/project
 
-# Start a Claude Code job
-tcd start -p claude -m "Add unit tests for the auth module" -d /path/to/project
-
-# Start a Gemini job
-tcd start -p gemini -m "Refactor the database layer" -d /path/to/project
+# Start with git worktree isolation (parallel-safe)
+tcd start -p codex --worktree --wt-name auth -m "Implement auth module" -d /project
 
 # Check if the job is done (exit codes: 0=idle, 1=working, 2=context_limit, 3=not_found)
 tcd check <job_id>
 
+# Structured check with diagnostics and activity
+tcd check <job_id> --json
+
 # Block until completion
 tcd wait <job_id> --timeout 300
 
-# Get the output
+# Get the output (supports incremental polling)
 tcd output <job_id>
+tcd output <job_id> --since-line 50
+tcd output <job_id> --tail 20
 
 # Send a follow-up message
 tcd send <job_id> "Now add error handling"
+
+# Merge worktree back to main branch
+tcd merge <job_id>
+tcd merge <job_id> --squash
 
 # List all jobs
 tcd jobs
@@ -64,6 +74,10 @@ tcd kill <job_id>
 
 # Clean up finished jobs
 tcd clean
+
+# Enable verbose logging
+tcd -v start -p codex -m "..." -d .    # INFO level
+tcd -vv check <job_id>                  # DEBUG level
 ```
 
 ### Python SDK
@@ -93,17 +107,37 @@ tcd.kill(job.id)
 tcd.clean()
 ```
 
+### Parallel Jobs with Worktrees
+
+```python
+from tcd import TCD
+
+tcd = TCD()
+
+# Launch parallel jobs in isolated worktrees
+auth_job = tcd.start("codex", "Implement auth module", cwd="/project",
+                     worktree=True, worktree_name="auth")
+api_job = tcd.start("codex", "Implement API layer", cwd="/project",
+                    worktree=True, worktree_name="api")
+
+# Wait for both, then merge
+for job_id in [auth_job.id, api_job.id]:
+    tcd.wait(job_id, timeout=600)
+    tcd.merge_worktree(job_id)
+```
+
 ## CLI Reference
 
 | Command | Description |
 |---------|-------------|
 | `tcd start -p <provider> -m <prompt>` | Start a new AI job |
 | `tcd status <job_id> [--json]` | Show job status |
-| `tcd check <job_id> [--json]` | Non-blocking completion check (--json adds diagnostics) |
+| `tcd check <job_id> [--json]` | Non-blocking completion check (--json adds diagnostics + activity) |
 | `tcd wait <job_id> [--timeout N]` | Block until job completes |
 | `tcd log <job_id> [--tail N] [--event TYPE]` | View job event log |
-| `tcd output <job_id> [--full] [--raw]` | Get job output |
+| `tcd output <job_id> [--full] [--raw] [--tail N] [--since-line N]` | Get job output |
 | `tcd send <job_id> <message>` | Send follow-up message |
+| `tcd merge <job_id> [--squash] [--no-cleanup]` | Merge worktree branch back to main |
 | `tcd jobs [--status S] [--json]` | List all jobs |
 | `tcd attach <job_id>` | Attach to tmux session (debugging) |
 | `tcd kill <job_id> [--all]` | Kill running job(s) |
@@ -118,7 +152,9 @@ tcd.clean()
 | `-d, --cwd` | Working directory (default: `.`) |
 | `--model` | Model name override |
 | `--timeout` | Timeout in minutes (default: 60) |
-| `--sandbox` | Codex sandbox mode |
+| `--sandbox` | Codex sandbox mode (default: `danger-full-access`) |
+| `--worktree` | Run in isolated git worktree |
+| `--wt-name` | Worktree name (default: auto-generated from job ID) |
 
 ## Provider Support
 
@@ -176,6 +212,7 @@ tcd log <job_id> --event job.checked # Filter by type
   "warnings": [
     {"code": "SANDBOX_MISMATCH", "severity": "warn", "message": "..."}
   ],
+  "activity": ["Edited src/main.py", "Ran pytest tests/"],
   "pane_tail": "... last 5 lines ..."
 }
 ```

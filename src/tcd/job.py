@@ -52,6 +52,8 @@ class Job:
     last_agent_message: str | None = None
     timeout_minutes: int = 60
     sandbox: str | None = None
+    worktree_path: str | None = None
+    worktree_branch: str | None = None
     total_tokens: dict[str, int] = field(default_factory=lambda: {"input": 0, "output": 0})
 
     def to_dict(self) -> dict:

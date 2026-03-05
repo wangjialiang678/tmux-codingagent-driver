@@ -3,6 +3,44 @@
 <!-- 执行阶段每次验证运行后自动追加记录 -->
 
 ---
+## Round 6 — 2026-03-05 v0.3.0 Worktree 支持（Codex 驱动闭环）
+
+阶段: Phase 1-3 全部实施
+触发原因: PRD prd-worktree.md 确认，通过 Codex Worker 分 3 阶段实施
+工作流: 闭环测试 + Codex 子代理编排
+
+### 实施过程
+
+| 阶段 | Codex Job | 耗时 | 产出 |
+|------|-----------|------|------|
+| Phase 1: Worktree 原语 | 326fbb48 | 5m11s | `src/tcd/worktree.py` + `tests/test_worktree.py` (12 tests) |
+| Phase 2: Job + SDK 集成 | ac139660 | ~5m | `job.py` 字段 + `sdk.py` start/merge/kill + `tests/test_worktree_sdk.py` (12 tests) |
+| Phase 3: CLI 集成 | 7632b48d | ~5m | `cli.py` --worktree/merge + `tests/test_cli_worktree.py` (7 tests) |
+
+### Codex 自修复
+
+- Phase 1: macOS `/var` vs `/private/var` 路径差异导致 `get_repo_root` 断言失败 → Codex 自动加 `.resolve()` 修复
+
+### 闭环验证结果
+
+| 测试项 | 结果 |
+|--------|------|
+| P0-1: 依赖安装 | PASS |
+| P0-2: 模块导入 (worktree) | PASS |
+| P0-3: 回归测试 (222 tests, 基线 191) | PASS |
+| P0-4: CLI 入口 (含 merge 子命令) | PASS |
+| P1 Phase 1: worktree 原语 (12/12) | PASS |
+| P1 Phase 2: SDK 集成 (12/12) | PASS |
+| P1 Phase 3: CLI 集成 (7/7) | PASS |
+
+### 摘要
+- 总测试: 222（+31 新测试）
+- 总修复: 1（Codex 自修复 macOS 路径）
+- 无振荡
+- 新增文件: 4（worktree.py, test_worktree.py, test_worktree_sdk.py, test_cli_worktree.py）
+- 修改文件: 3（job.py, sdk.py, cli.py）
+
+---
 ## Round 1 — 2026-03-02 Step 1-9 单元测试回归
 
 阶段: P0

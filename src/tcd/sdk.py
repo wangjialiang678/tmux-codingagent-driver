@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import time
 from dataclasses import dataclass, field
 from typing import Literal
@@ -79,6 +80,8 @@ class TCD:
         model: str | None = None,
         timeout: int = 60,
         sandbox: str | None = None,
+        worktree: bool = False,
+        worktree_name: str | None = None,
     ) -> Job:
         """Start a new AI job.
 
@@ -111,6 +114,34 @@ class TCD:
                 raise TCDError(str(e)) from e
 
         job = self._mgr.create_job(provider, prompt, cwd, model=model, timeout_minutes=timeout, sandbox=sandbox)
+        if worktree:
+            from tcd.worktree import WorktreeError, create_worktree, is_git_repo
+
+            if not is_git_repo(cwd):
+                raise TCDError("cwd is not a git repository")
+
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+            )
+            if status.stdout.strip():
+                raise TCDError("uncommitted changes in working directory")
+
+            name = worktree_name or job.id
+            try:
+                wt_path = create_worktree(cwd, name)
+            except WorktreeError as e:
+                raise TCDError(str(e)) from e
+
+            cwd = str(wt_path)
+            job.cwd = cwd
+            job.worktree_path = cwd
+            job.worktree_branch = f"tcd/{name}"
+            self._mgr.save_job(job)
+            emit(job.id, "job.worktree_created", worktree_path=str(wt_path), branch=f"tcd/{name}")
+
         emit(job.id, "job.created", provider=provider, sandbox=sandbox, cwd=cwd, model=model)
 
         launch_cmd = prov.build_launch_command(job)
@@ -307,6 +338,40 @@ class TCD:
         """List jobs, optionally filtered by status."""
         return self._mgr.list_jobs(status_filter=status)
 
+    def merge_worktree(
+        self,
+        job_id: str,
+        *,
+        strategy: str = "merge",
+        cleanup: bool = True,
+    ) -> bool:
+        """Merge a worktree job's branch back and clean up.
+
+        Returns True if merge succeeded, False if there were conflicts.
+        """
+        from tcd.worktree import delete_branch, get_repo_root, merge_branch, remove_worktree
+
+        job = self._mgr.load_job(job_id)
+        if job is None:
+            raise JobNotFoundError(f"Job {job_id!r} not found")
+        if not job.worktree_branch:
+            raise TCDError(f"Job {job_id} has no worktree")
+
+        repo_root = get_repo_root(job.cwd)
+        success = merge_branch(repo_root, job.worktree_branch, strategy=strategy)
+
+        if success and cleanup:
+            if job.worktree_path:
+                remove_worktree(job.worktree_path)
+                emit(job.id, "job.worktree_removed", worktree_path=job.worktree_path)
+            delete_branch(repo_root, job.worktree_branch)
+            job.worktree_path = None
+            job.worktree_branch = None
+            self._mgr.save_job(job)
+
+        emit(job.id, "job.worktree_merged", success=success, strategy=strategy)
+        return success
+
     def kill(self, job_id: str) -> None:
         """Kill a running job.
 
@@ -323,6 +388,14 @@ class TCD:
         job.error = "killed by user"
         job.completed_at = _now_iso()
         self._mgr.save_job(job)
+        if job.worktree_path:
+            try:
+                from tcd.worktree import remove_worktree
+
+                remove_worktree(job.worktree_path)
+                emit(job.id, "job.worktree_removed", worktree_path=job.worktree_path)
+            except Exception:
+                pass  # best-effort cleanup
         emit(job.id, "job.killed", reason="user")
 
     def clean(self, *, include_running: bool = False) -> int:

@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.3.0 — 2026-03-05
+
+Git worktree 并行隔离、增量输出、活动提取、日志系统。
+
+### Git Worktree 支持
+
+- 新增 `src/tcd/worktree.py`：git worktree 原语（create/remove/merge/delete_branch）
+- `tcd start --worktree [--wt-name NAME]`：在独立 worktree 中启动任务
+- `tcd merge <job_id> [--squash] [--no-cleanup]`：合并 worktree 分支回主分支
+- SDK `start()` 新增 `worktree`/`worktree_name` 参数，新增 `merge_worktree()` 方法
+- `kill` 自动清理 worktree
+- Job 模型新增 `worktree_path`/`worktree_branch` 字段
+
+### 增量输出与活动提取
+
+- `tcd output --tail N`：只输出最后 N 行
+- `tcd output --since-line N`：增量轮询（输出第 N 行之后的内容）
+- `tcd check --json` 新增 `activity` 字段：从 scrollback 正则提取有意义的操作行（Edited, Created, Ran 等）
+- 输出行数通过 stderr `__lines_total=N` 暴露，支持外部轮询追踪
+
+### 日志系统
+
+- `tcd -v`（INFO）/ `tcd -vv`（DEBUG）详细日志，输出到 stderr
+- INFO 级别覆盖所有关键流程：start, check, send, kill, merge, refresh_status
+- WARNING 级别覆盖异常路径：TUI 超时、context_limit、合并冲突、worktree 清理失败、session 消失
+
+### 默认 Sandbox 变更
+
+- Codex 默认 sandbox 从 `workspace-write` 改为 `danger-full-access`
+- 诊断规则 R1 只对显式指定 `workspace-write`/`workspace-read` 时警告
+
+### 测试
+
+- 新增 32 个测试用例（worktree 原语 12 + SDK 集成 12 + CLI 7 + 诊断 1）
+- 总测试数: 191 -> 223
+
+---
+
 ## v0.2.0 — 2026-03-05
 
 事件日志与诊断系统，全面提升 tcd 的可观测性。详见 `docs/prd-event-log.md`。
