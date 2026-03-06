@@ -34,6 +34,69 @@ def get_repo_root(path: str | Path) -> Path:
     return Path(result.stdout.strip())
 
 
+def get_main_repo_root(path: str | Path) -> Path:
+    """Get the main/shared repo root for a checkout or linked worktree path."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--git-common-dir"],
+        cwd=str(path),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise WorktreeError(f"Not a git repo: {path}")
+
+    common_dir = Path(result.stdout.strip())
+    if not common_dir.is_absolute():
+        common_dir = (Path(path) / common_dir).resolve()
+    return common_dir.parent
+
+
+def is_dirty(repo_path: str | Path) -> bool:
+    """Check if the working directory has uncommitted changes."""
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(repo_path),
+        capture_output=True,
+        text=True,
+    )
+    return bool(result.stdout.strip())
+
+
+def auto_stash(repo_path: str | Path, message: str = "tcd: auto-stash before worktree") -> str | None:
+    """Stash uncommitted changes. Returns stash ref on success, None if nothing to stash."""
+    if not is_dirty(repo_path):
+        return None
+
+    result = subprocess.run(
+        ["git", "stash", "push", "--include-untracked", "-m", message],
+        cwd=str(repo_path),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise WorktreeError(f"git stash failed: {result.stderr.strip()}")
+
+    # Get the stash ref (stash@{0} after push)
+    ref_result = subprocess.run(
+        ["git", "stash", "list", "--max-count=1", "--format=%H"],
+        cwd=str(repo_path),
+        capture_output=True,
+        text=True,
+    )
+    return ref_result.stdout.strip() or "stash@{0}"
+
+
+def stash_pop(repo_path: str | Path) -> bool:
+    """Pop the most recent stash. Returns True on success."""
+    result = subprocess.run(
+        ["git", "stash", "pop"],
+        cwd=str(repo_path),
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
 def create_worktree(repo_path: str | Path, branch_name: str) -> Path:
     """Create a worktree in a sibling directory.
 
@@ -124,11 +187,14 @@ def merge_branch(
     return result.returncode == 0
 
 
-def delete_branch(repo_path: str | Path, branch: str) -> None:
+def delete_branch(repo_path: str | Path, branch: str, *, force: bool = False) -> None:
     """Delete a local branch after merge."""
-    subprocess.run(
-        ["git", "branch", "-d", branch],
+    delete_flag = "-D" if force else "-d"
+    result = subprocess.run(
+        ["git", "branch", delete_flag, branch],
         cwd=str(repo_path),
         capture_output=True,
         text=True,
     )
+    if result.returncode != 0:
+        raise WorktreeError(f"git branch {delete_flag} failed: {result.stderr.strip()}")

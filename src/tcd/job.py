@@ -54,6 +54,8 @@ class Job:
     sandbox: str | None = None
     worktree_path: str | None = None
     worktree_branch: str | None = None
+    worktree_repo_root: str | None = None
+    worktree_stash_ref: str | None = None
     total_tokens: dict[str, int] = field(default_factory=lambda: {"input": 0, "output": 0})
 
     def to_dict(self) -> dict:
@@ -66,7 +68,10 @@ class Job:
     def from_dict(cls, d: dict) -> Job:
         # Filter out unknown keys for forward compatibility
         valid_keys = {f.name for f in cls.__dataclass_fields__.values()}
-        return cls(**{k: v for k, v in d.items() if k in valid_keys})
+        payload = {k: v for k, v in d.items() if k in valid_keys}
+        # Backward compatibility for jobs created before worktree repo root tracking.
+        payload.setdefault("worktree_repo_root", None)
+        return cls(**payload)
 
     @classmethod
     def from_json(cls, text: str) -> Job:

@@ -107,21 +107,21 @@ def start(
             click.echo(f"Error: {e}", err=True)
             sys.exit(1)
 
+    stash_ref = None
     if worktree:
-        from tcd.worktree import is_git_repo
+        from tcd.worktree import WorktreeError, auto_stash, is_git_repo
 
         if not is_git_repo(cwd):
             click.echo("Error: cwd is not a git repository.", err=True)
             sys.exit(1)
 
-        status = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-        )
-        if status.stdout.strip():
-            click.echo("Error: uncommitted changes in working directory.", err=True)
+        try:
+            stash_ref = auto_stash(cwd)
+            if stash_ref:
+                click.echo(f"Stashed uncommitted changes ({stash_ref[:8]}).")
+                logger.info("start: auto-stashed dirty state, ref=%s", stash_ref)
+        except WorktreeError as e:
+            click.echo(f"Error: {e}", err=True)
             sys.exit(1)
 
     # Create job
@@ -130,7 +130,7 @@ def start(
     logger.info("start %s: provider=%s cwd=%s sandbox=%s worktree=%s", job.id, provider, cwd, sandbox, worktree)
 
     if worktree:
-        from tcd.worktree import WorktreeError, create_worktree
+        from tcd.worktree import create_worktree
 
         name = wt_name or job.id
         try:
@@ -139,93 +139,123 @@ def start(
             click.echo(f"Error: {e}", err=True)
             sys.exit(1)
 
+        job.worktree_repo_root = cwd
         cwd = str(wt_path)
         job.cwd = cwd
         job.worktree_path = cwd
         job.worktree_branch = f"tcd/{name}"
+        if stash_ref:
+            job.worktree_stash_ref = stash_ref
         mgr.save_job(job)
         logger.info("start %s: worktree created at %s branch=tcd/%s", job.id, cwd, name)
         emit(job.id, "job.worktree_created", worktree_path=cwd, branch=f"tcd/{name}")
 
-    emit(job.id, "job.created", provider=provider, sandbox=sandbox, cwd=cwd, model=model)
+    try:
+        emit(job.id, "job.created", provider=provider, sandbox=sandbox, cwd=cwd, model=model)
 
-    # Build and launch
-    launch_cmd = prov.build_launch_command(job)
-    if not tmux.create_session(job.tmux_session, launch_cmd, cwd):
-        click.echo(f"Error: failed to create tmux session.", err=True)
-        job.status = "failed"
-        job.error = "tmux session creation failed"
+        # Build and launch
+        launch_cmd = prov.build_launch_command(job)
+        if not tmux.create_session(job.tmux_session, launch_cmd, cwd):
+            job.status = "failed"
+            job.error = "tmux session creation failed"
+            mgr.save_job(job)
+            raise RuntimeError("failed to create tmux session")
+
+        # Update job status
+        job.status = "running"
+        job.started_at = _now_iso()
+        job.turn_state = "working"
         mgr.save_job(job)
-        sys.exit(1)
 
-    # Update job status
-    job.status = "running"
-    job.started_at = _now_iso()
-    job.turn_state = "working"
-    mgr.save_job(job)
+        # Wait for TUI init (poll for readiness indicator, up to 30s)
+        # Handles trust dialogs from Claude Code and Gemini CLI (which may restart)
+        indicator = prov.tui_ready_indicator
+        tui_ready = False
+        trust_handled = False
+        tui_wait_started = time.time()
+        for _ in range(60):
+            time.sleep(0.5)
+            pane = tmux.capture_pane(job.tmux_session)
+            if pane is None:
+                continue
 
-    # Wait for TUI init (poll for readiness indicator, up to 30s)
-    # Handles trust dialogs from Claude Code and Gemini CLI (which may restart)
-    indicator = prov.tui_ready_indicator
-    tui_ready = False
-    trust_handled = False
-    tui_wait_started = time.time()
-    for _ in range(60):
-        time.sleep(0.5)
-        pane = tmux.capture_pane(job.tmux_session)
-        if pane is None:
-            continue
+            # Handle trust/confirmation dialogs (Claude Code, Gemini CLI)
+            trust_phrases = [
+                "Yes, I trust this folder",
+                "Enter to confirm",
+                "Do you trust the files in this folder",
+            ]
+            if any(phrase in pane for phrase in trust_phrases):
+                tmux.send_enter(job.tmux_session)
+                trust_handled = True
+                time.sleep(2)
+                continue
 
-        # Handle trust/confirmation dialogs (Claude Code, Gemini CLI)
-        trust_phrases = [
-            "Yes, I trust this folder",
-            "Enter to confirm",
-            "Do you trust the files in this folder",
-        ]
-        if any(phrase in pane for phrase in trust_phrases):
-            tmux.send_enter(job.tmux_session)
-            trust_handled = True
-            time.sleep(2)
-            continue
-
-        # After trust handling, wait for restart to complete
-        if trust_handled and "restarting" in pane.lower():
-            time.sleep(1)
-            continue
-
-        if indicator and indicator in pane:
-            if trust_handled:
-                # Extra delay after restart to let TUI fully initialize
+            # After trust handling, wait for restart to complete
+            if trust_handled and "restarting" in pane.lower():
                 time.sleep(1)
-            tui_ready = True
-            break
-    if not tui_ready:
-        # Fallback: just wait a bit and try anyway
-        time.sleep(2)
-    elapsed_ms = int((time.time() - tui_wait_started) * 1000)
-    if tui_ready:
-        logger.info("start %s: TUI ready in %dms (trust_handled=%s)", job.id, elapsed_ms, trust_handled)
-        emit(job.id, "job.tui_ready", elapsed_ms=elapsed_ms, trust_handled=trust_handled)
-    else:
-        logger.warning("start %s: TUI not ready after %dms, proceeding anyway (trust_handled=%s)", job.id, elapsed_ms, trust_handled)
-        emit(job.id, "job.tui_timeout", elapsed_ms=elapsed_ms, trust_handled=trust_handled)
+                continue
 
-    # Inject prompt
-    req_id = f"{job.id}-0-{int(time.time())}"
-    wrapped = prov.build_prompt_wrapper(prompt, req_id)
-    if not tmux.send_text(job.tmux_session, wrapped):
-        job.status = "failed"
-        job.error = "failed to send initial prompt to tmux session"
-        job.completed_at = _now_iso()
+            if indicator and indicator in pane:
+                if trust_handled:
+                    # Extra delay after restart to let TUI fully initialize
+                    time.sleep(1)
+                tui_ready = True
+                break
+        if not tui_ready:
+            # Fallback: just wait a bit and try anyway
+            time.sleep(2)
+        elapsed_ms = int((time.time() - tui_wait_started) * 1000)
+        if tui_ready:
+            logger.info("start %s: TUI ready in %dms (trust_handled=%s)", job.id, elapsed_ms, trust_handled)
+            emit(job.id, "job.tui_ready", elapsed_ms=elapsed_ms, trust_handled=trust_handled)
+        else:
+            logger.warning("start %s: TUI not ready after %dms, proceeding anyway (trust_handled=%s)", job.id, elapsed_ms, trust_handled)
+            emit(job.id, "job.tui_timeout", elapsed_ms=elapsed_ms, trust_handled=trust_handled)
+
+        # Inject prompt
+        req_id = f"{job.id}-0-{int(time.time())}"
+        wrapped = prov.build_prompt_wrapper(prompt, req_id)
+        if not tmux.send_text(job.tmux_session, wrapped):
+            job.status = "failed"
+            job.error = "failed to send initial prompt to tmux session"
+            job.completed_at = _now_iso()
+            mgr.save_job(job)
+            raise RuntimeError("failed to send initial prompt to tmux session")
+        logger.info("start %s: prompt sent (%d bytes, req_id=%s)", job.id, len(wrapped.encode("utf-8")), req_id)
+        emit(job.id, "job.prompt_sent", bytes=len(wrapped.encode("utf-8")), req_id=req_id)
+
+        click.echo(f"Job started: {job.id}")
+        click.echo(f"Provider: {provider}")
+        click.echo(f"tmux session: {job.tmux_session}")
+    except Exception as exc:
+        if job.status != "failed":
+            job.status = "failed"
+        if not job.error:
+            job.error = str(exc)
+        if not job.completed_at:
+            job.completed_at = _now_iso()
         mgr.save_job(job)
-        click.echo("Error: failed to send initial prompt to tmux session.", err=True)
-        sys.exit(1)
-    logger.info("start %s: prompt sent (%d bytes, req_id=%s)", job.id, len(wrapped.encode("utf-8")), req_id)
-    emit(job.id, "job.prompt_sent", bytes=len(wrapped.encode("utf-8")), req_id=req_id)
 
-    click.echo(f"Job started: {job.id}")
-    click.echo(f"Provider: {provider}")
-    click.echo(f"tmux session: {job.tmux_session}")
+        if job.worktree_path and job.worktree_branch:
+            try:
+                from pathlib import Path
+
+                from tcd.worktree import delete_branch, get_main_repo_root, remove_worktree
+
+                repo_root = Path(job.worktree_repo_root) if job.worktree_repo_root else get_main_repo_root(job.cwd)
+                worktree_path = job.worktree_path
+                remove_worktree(worktree_path)
+                delete_branch(repo_root, job.worktree_branch)
+                emit(job.id, "job.worktree_removed", worktree_path=worktree_path)
+                job.worktree_path = None
+                job.worktree_branch = None
+                mgr.save_job(job)
+            except Exception:
+                logger.warning("start %s: failed to rollback worktree setup", job.id, exc_info=True)
+
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -671,9 +701,11 @@ def merge(job_id: str, squash: bool, no_cleanup: bool):
         click.echo(f"Error: Job {job_id} has no worktree.", err=True)
         sys.exit(1)
 
-    from tcd.worktree import delete_branch, get_repo_root, merge_branch, remove_worktree
+    from pathlib import Path
 
-    repo_root = get_repo_root(job.cwd)
+    from tcd.worktree import delete_branch, get_main_repo_root, merge_branch, remove_worktree, stash_pop
+
+    repo_root = Path(job.worktree_repo_root) if job.worktree_repo_root else get_main_repo_root(job.cwd)
     strategy = "squash" if squash else "merge"
     logger.info("merge %s: merging branch=%s strategy=%s", job.id, job.worktree_branch, strategy)
     success = merge_branch(repo_root, job.worktree_branch, strategy=strategy)
@@ -684,19 +716,34 @@ def merge(job_id: str, squash: bool, no_cleanup: bool):
         emit(job.id, "job.worktree_merged", success=False, strategy=strategy)
         sys.exit(1)
 
+    emit(job.id, "job.worktree_merged", success=True, strategy=strategy)
     logger.info("merge %s: success, cleanup=%s", job.id, not no_cleanup)
     click.echo(f"Merged {job.worktree_branch} ({strategy}).")
 
     if not no_cleanup and job.worktree_path:
-        remove_worktree(job.worktree_path)
-        delete_branch(repo_root, job.worktree_branch)
-        emit(job.id, "job.worktree_removed", worktree_path=job.worktree_path)
-        job.worktree_path = None
-        job.worktree_branch = None
-        mgr.save_job(job)
-        click.echo("Worktree cleaned up.")
+        try:
+            remove_worktree(job.worktree_path)
+            if strategy == "squash":
+                delete_branch(repo_root, job.worktree_branch, force=True)
+            else:
+                delete_branch(repo_root, job.worktree_branch)
+            emit(job.id, "job.worktree_removed", worktree_path=job.worktree_path)
+            job.worktree_path = None
+            job.worktree_branch = None
+            mgr.save_job(job)
+            click.echo("Worktree cleaned up.")
+        except Exception as exc:
+            logger.warning("merge %s: cleanup failed", job.id, exc_info=True)
+            click.echo(f"Warning: merge succeeded but cleanup failed: {exc}", err=True)
 
-    emit(job.id, "job.worktree_merged", success=True, strategy=strategy)
+    # Restore stashed changes if any were auto-stashed before worktree creation
+    if job.worktree_stash_ref:
+        if stash_pop(repo_root):
+            click.echo("Restored stashed changes.")
+            logger.info("merge %s: stash popped successfully", job.id)
+        else:
+            click.echo("Warning: failed to pop stash. Run 'git stash pop' manually.", err=True)
+            logger.warning("merge %s: stash pop failed, ref=%s", job.id, job.worktree_stash_ref)
 
 
 # ---------------------------------------------------------------------------
@@ -758,11 +805,20 @@ def _kill_job(job: Job, tmux: TmuxAdapter, mgr: JobManager) -> None:
     mgr.save_job(job)
     if job.worktree_path:
         try:
-            from tcd.worktree import remove_worktree
+            from pathlib import Path
+
+            from tcd.worktree import delete_branch, get_main_repo_root, remove_worktree
+
+            repo_root = Path(job.worktree_repo_root) if job.worktree_repo_root else get_main_repo_root(job.cwd)
 
             remove_worktree(job.worktree_path)
+            if job.worktree_branch:
+                delete_branch(repo_root, job.worktree_branch)
             logger.info("kill %s: worktree removed at %s", job.id, job.worktree_path)
             emit(job.id, "job.worktree_removed", worktree_path=job.worktree_path)
+            job.worktree_path = None
+            job.worktree_branch = None
+            mgr.save_job(job)
         except Exception:
             logger.warning("kill %s: failed to remove worktree at %s", job.id, job.worktree_path, exc_info=True)
     emit(job.id, "job.killed", reason="user")

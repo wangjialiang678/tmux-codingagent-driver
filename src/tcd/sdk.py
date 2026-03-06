@@ -135,6 +135,7 @@ class TCD:
             except WorktreeError as e:
                 raise TCDError(str(e)) from e
 
+            job.worktree_repo_root = cwd
             cwd = str(wt_path)
             job.cwd = cwd
             job.worktree_path = cwd
@@ -142,35 +143,65 @@ class TCD:
             self._mgr.save_job(job)
             emit(job.id, "job.worktree_created", worktree_path=str(wt_path), branch=f"tcd/{name}")
 
-        emit(job.id, "job.created", provider=provider, sandbox=sandbox, cwd=cwd, model=model)
+        try:
+            emit(job.id, "job.created", provider=provider, sandbox=sandbox, cwd=cwd, model=model)
 
-        launch_cmd = prov.build_launch_command(job)
-        if not self._tmux.create_session(job.tmux_session, launch_cmd, cwd):
-            job.status = "failed"
-            job.error = "tmux session creation failed"
+            launch_cmd = prov.build_launch_command(job)
+            if not self._tmux.create_session(job.tmux_session, launch_cmd, cwd):
+                job.status = "failed"
+                job.error = "tmux session creation failed"
+                self._mgr.save_job(job)
+                raise TCDError("Failed to create tmux session")
+
+            job.status = "running"
+            job.started_at = _now_iso()
+            job.turn_state = "working"
             self._mgr.save_job(job)
-            raise TCDError("Failed to create tmux session")
 
-        job.status = "running"
-        job.started_at = _now_iso()
-        job.turn_state = "working"
-        self._mgr.save_job(job)
+            # Wait for TUI readiness
+            tui_ready, elapsed_ms, trust_handled = self._wait_for_tui(job, prov)
+            if tui_ready:
+                emit(job.id, "job.tui_ready", elapsed_ms=elapsed_ms, trust_handled=trust_handled)
+            else:
+                emit(job.id, "job.tui_timeout", elapsed_ms=elapsed_ms, trust_handled=trust_handled)
 
-        # Wait for TUI readiness
-        tui_ready, elapsed_ms, trust_handled = self._wait_for_tui(job, prov)
-        if tui_ready:
-            emit(job.id, "job.tui_ready", elapsed_ms=elapsed_ms, trust_handled=trust_handled)
-        else:
-            emit(job.id, "job.tui_timeout", elapsed_ms=elapsed_ms, trust_handled=trust_handled)
+            # Inject prompt
+            req_id = f"{job.id}-0-{int(time.time())}"
+            wrapped = prov.build_prompt_wrapper(prompt, req_id)
+            if not self._tmux.send_text(job.tmux_session, wrapped):
+                raise TCDError("Failed to send prompt to tmux session")
+            emit(job.id, "job.prompt_sent", bytes=len(wrapped.encode("utf-8")), req_id=req_id)
 
-        # Inject prompt
-        req_id = f"{job.id}-0-{int(time.time())}"
-        wrapped = prov.build_prompt_wrapper(prompt, req_id)
-        if not self._tmux.send_text(job.tmux_session, wrapped):
-            raise TCDError("Failed to send prompt to tmux session")
-        emit(job.id, "job.prompt_sent", bytes=len(wrapped.encode("utf-8")), req_id=req_id)
+            return job
+        except Exception as exc:
+            if job.status != "failed":
+                job.status = "failed"
+            if not job.error:
+                job.error = str(exc)
+            if not job.completed_at:
+                job.completed_at = _now_iso()
+            self._mgr.save_job(job)
 
-        return job
+            if job.worktree_path and job.worktree_branch:
+                try:
+                    from pathlib import Path
+
+                    from tcd.worktree import delete_branch, get_main_repo_root, remove_worktree
+
+                    repo_root = Path(job.worktree_repo_root) if job.worktree_repo_root else get_main_repo_root(job.cwd)
+                    worktree_path = job.worktree_path
+                    remove_worktree(worktree_path)
+                    delete_branch(repo_root, job.worktree_branch)
+                    emit(job.id, "job.worktree_removed", worktree_path=worktree_path)
+                    job.worktree_path = None
+                    job.worktree_branch = None
+                    self._mgr.save_job(job)
+                except Exception:
+                    pass  # best-effort rollback
+
+            if isinstance(exc, TCDError):
+                raise
+            raise TCDError(str(exc)) from exc
 
     def check(self, job_id: str) -> CheckResult:
         """Non-blocking completion check.
@@ -349,7 +380,9 @@ class TCD:
 
         Returns True if merge succeeded, False if there were conflicts.
         """
-        from tcd.worktree import delete_branch, get_repo_root, merge_branch, remove_worktree
+        from pathlib import Path
+
+        from tcd.worktree import delete_branch, get_main_repo_root, merge_branch, remove_worktree
 
         job = self._mgr.load_job(job_id)
         if job is None:
@@ -357,20 +390,28 @@ class TCD:
         if not job.worktree_branch:
             raise TCDError(f"Job {job_id} has no worktree")
 
-        repo_root = get_repo_root(job.cwd)
+        repo_root = Path(job.worktree_repo_root) if job.worktree_repo_root else get_main_repo_root(job.cwd)
         success = merge_branch(repo_root, job.worktree_branch, strategy=strategy)
 
-        if success and cleanup:
+        if not success:
+            emit(job.id, "job.worktree_merged", success=False, strategy=strategy)
+            return False
+
+        emit(job.id, "job.worktree_merged", success=True, strategy=strategy)
+
+        if cleanup:
             if job.worktree_path:
                 remove_worktree(job.worktree_path)
                 emit(job.id, "job.worktree_removed", worktree_path=job.worktree_path)
-            delete_branch(repo_root, job.worktree_branch)
+            if strategy == "squash":
+                delete_branch(repo_root, job.worktree_branch, force=True)
+            else:
+                delete_branch(repo_root, job.worktree_branch)
             job.worktree_path = None
             job.worktree_branch = None
             self._mgr.save_job(job)
 
-        emit(job.id, "job.worktree_merged", success=success, strategy=strategy)
-        return success
+        return True
 
     def kill(self, job_id: str) -> None:
         """Kill a running job.
@@ -390,10 +431,19 @@ class TCD:
         self._mgr.save_job(job)
         if job.worktree_path:
             try:
-                from tcd.worktree import remove_worktree
+                from pathlib import Path
+
+                from tcd.worktree import delete_branch, get_main_repo_root, remove_worktree
+
+                repo_root = Path(job.worktree_repo_root) if job.worktree_repo_root else get_main_repo_root(job.cwd)
 
                 remove_worktree(job.worktree_path)
+                if job.worktree_branch:
+                    delete_branch(repo_root, job.worktree_branch)
                 emit(job.id, "job.worktree_removed", worktree_path=job.worktree_path)
+                job.worktree_path = None
+                job.worktree_branch = None
+                self._mgr.save_job(job)
             except Exception:
                 pass  # best-effort cleanup
         emit(job.id, "job.killed", reason="user")

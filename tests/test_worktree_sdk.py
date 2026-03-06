@@ -90,6 +90,7 @@ def test_job_backward_compat():
     job = Job.from_dict(legacy)
     assert job.worktree_path is None
     assert job.worktree_branch is None
+    assert job.worktree_repo_root is None
 
 
 def test_start_worktree_creates_worktree(sdk):
@@ -136,6 +137,69 @@ def test_start_worktree_uncommitted_changes(sdk):
     mock_create_worktree.assert_not_called()
 
 
+def test_start_worktree_rolls_back_on_tmux_create_failure(sdk):
+    provider = _provider_mock()
+    sdk._tmux.create_session.return_value = False
+    job = Job(
+        id="test123",
+        provider="codex",
+        status="pending",
+        prompt="do work",
+        cwd="/repo",
+        tmux_session="tcd-codex-test123",
+    )
+    sdk._mgr.create_job.side_effect = None
+    sdk._mgr.create_job.return_value = job
+
+    with (
+        patch("tcd.sdk.get_provider", return_value=provider),
+        patch("tcd.worktree.is_git_repo", return_value=True),
+        patch("tcd.worktree.create_worktree", return_value=Path("/repo-wt-test123")),
+        patch("tcd.sdk.subprocess.run", return_value=MagicMock(stdout="")),
+        patch("tcd.worktree.remove_worktree") as mock_remove,
+        patch("tcd.worktree.delete_branch") as mock_delete,
+    ):
+        with pytest.raises(TCDError, match="Failed to create tmux session"):
+            sdk.start("codex", "do work", "/repo", worktree=True)
+
+    mock_remove.assert_called_once_with("/repo-wt-test123")
+    mock_delete.assert_called_once_with(Path("/repo"), "tcd/test123")
+    assert job.worktree_path is None
+    assert job.worktree_branch is None
+
+
+def test_start_worktree_rolls_back_on_prompt_send_failure(sdk):
+    provider = _provider_mock()
+    sdk._tmux.send_text.return_value = False
+    job = Job(
+        id="test123",
+        provider="codex",
+        status="pending",
+        prompt="do work",
+        cwd="/repo",
+        tmux_session="tcd-codex-test123",
+    )
+    sdk._mgr.create_job.side_effect = None
+    sdk._mgr.create_job.return_value = job
+
+    with (
+        patch("tcd.sdk.get_provider", return_value=provider),
+        patch.object(TCD, "_wait_for_tui", return_value=(True, 5, False)),
+        patch("tcd.worktree.is_git_repo", return_value=True),
+        patch("tcd.worktree.create_worktree", return_value=Path("/repo-wt-test123")),
+        patch("tcd.sdk.subprocess.run", return_value=MagicMock(stdout="")),
+        patch("tcd.worktree.remove_worktree") as mock_remove,
+        patch("tcd.worktree.delete_branch") as mock_delete,
+    ):
+        with pytest.raises(TCDError, match="Failed to send prompt to tmux session"):
+            sdk.start("codex", "do work", "/repo", worktree=True)
+
+    mock_remove.assert_called_once_with("/repo-wt-test123")
+    mock_delete.assert_called_once_with(Path("/repo"), "tcd/test123")
+    assert job.worktree_path is None
+    assert job.worktree_branch is None
+
+
 def test_merge_worktree_success(sdk):
     job = Job(
         id="test123",
@@ -146,11 +210,11 @@ def test_merge_worktree_success(sdk):
         tmux_session="tcd-codex-test123",
         worktree_path="/repo-wt-test123",
         worktree_branch="tcd/test123",
+        worktree_repo_root="/repo",
     )
     sdk._mgr.load_job.return_value = job
 
     with (
-        patch("tcd.worktree.get_repo_root", return_value=Path("/repo")) as mock_repo_root,
         patch("tcd.worktree.merge_branch", return_value=True),
         patch("tcd.worktree.remove_worktree") as mock_remove,
         patch("tcd.worktree.delete_branch") as mock_delete,
@@ -160,7 +224,6 @@ def test_merge_worktree_success(sdk):
     assert merged is True
     mock_remove.assert_called_once_with("/repo-wt-test123")
     mock_delete.assert_called_once_with(Path("/repo"), "tcd/test123")
-    assert mock_repo_root.called
     assert job.worktree_path is None
     assert job.worktree_branch is None
     sdk._mgr.save_job.assert_called_once_with(job)
@@ -176,11 +239,11 @@ def test_merge_worktree_conflict(sdk):
         tmux_session="tcd-codex-test123",
         worktree_path="/repo-wt-test123",
         worktree_branch="tcd/test123",
+        worktree_repo_root="/repo",
     )
     sdk._mgr.load_job.return_value = job
 
     with (
-        patch("tcd.worktree.get_repo_root", return_value=Path("/repo")),
         patch("tcd.worktree.merge_branch", return_value=False),
         patch("tcd.worktree.remove_worktree") as mock_remove,
         patch("tcd.worktree.delete_branch") as mock_delete,
@@ -193,6 +256,31 @@ def test_merge_worktree_conflict(sdk):
     assert job.worktree_path == "/repo-wt-test123"
     assert job.worktree_branch == "tcd/test123"
     sdk._mgr.save_job.assert_not_called()
+
+
+def test_merge_worktree_squash_cleanup_forces_branch_delete(sdk):
+    job = Job(
+        id="test123",
+        provider="codex",
+        status="running",
+        prompt="test",
+        cwd="/repo-wt-test123",
+        tmux_session="tcd-codex-test123",
+        worktree_path="/repo-wt-test123",
+        worktree_branch="tcd/test123",
+        worktree_repo_root="/repo",
+    )
+    sdk._mgr.load_job.return_value = job
+
+    with (
+        patch("tcd.worktree.merge_branch", return_value=True),
+        patch("tcd.worktree.remove_worktree"),
+        patch("tcd.worktree.delete_branch") as mock_delete,
+    ):
+        merged = sdk.merge_worktree("test123", strategy="squash")
+
+    assert merged is True
+    mock_delete.assert_called_once_with(Path("/repo"), "tcd/test123", force=True)
 
 
 def test_merge_worktree_no_worktree(sdk):
@@ -220,13 +308,20 @@ def test_kill_cleans_worktree(sdk):
         tmux_session="tcd-codex-test123",
         worktree_path="/repo-wt-test123",
         worktree_branch="tcd/test123",
+        worktree_repo_root="/repo",
     )
     sdk._mgr.load_job.return_value = job
 
-    with patch("tcd.worktree.remove_worktree") as mock_remove:
+    with (
+        patch("tcd.worktree.remove_worktree") as mock_remove,
+        patch("tcd.worktree.delete_branch") as mock_delete,
+    ):
         sdk.kill("test123")
 
     mock_remove.assert_called_once_with("/repo-wt-test123")
+    mock_delete.assert_called_once_with(Path("/repo"), "tcd/test123")
+    assert job.worktree_path is None
+    assert job.worktree_branch is None
 
 
 def test_kill_no_worktree(sdk):
@@ -270,11 +365,11 @@ def test_worktree_merged_event(sdk):
         tmux_session="tcd-codex-test123",
         worktree_path="/repo-wt-test123",
         worktree_branch="tcd/test123",
+        worktree_repo_root="/repo",
     )
     sdk._mgr.load_job.return_value = job
 
     with (
-        patch("tcd.worktree.get_repo_root", return_value=Path("/repo")),
         patch("tcd.worktree.merge_branch", return_value=True),
         patch("tcd.worktree.remove_worktree"),
         patch("tcd.worktree.delete_branch"),

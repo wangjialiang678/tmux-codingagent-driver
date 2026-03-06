@@ -43,6 +43,7 @@ cli.py (Click CLI) --> sdk.py (TCD class) --> job.py (Job + JobManager)
                                           --> tmux_adapter.py (tmux primitives)
                                           --> collector.py (response collection)
                                           --> event_log.py (append-only JSONL events)
+                                          --> worktree.py (git worktree primitives)
 
 provider.py <-- providers/codex.py   (CodexProvider + CodexOutput)
             <-- providers/claude.py  (ClaudeProvider)
@@ -81,6 +82,16 @@ Providers auto-register on import via `src/tcd/__init__.py`.
 - **CaptureDepth enum**: Semantic constants (STATUS=20, HEALTH=50, CONTEXT=500, CHECKPOINT=2000, FULL=-1) instead of magic numbers.
 - **Atomic job persistence**: `JobManager.save_job()` uses write-to-temp + `os.replace()`.
 - **Trust dialog handling**: `sdk.py:_wait_for_tui()` auto-accepts trust prompts before injecting the first prompt.
+
+### Git Worktree Isolation
+
+`worktree.py` provides primitives for running parallel jobs in isolated git worktrees. The `cli.py` and `sdk.py` layers use these to:
+- Create a worktree branch from HEAD (`create_worktree()`)
+- Track worktree metadata in the Job object (`worktree_path`, `worktree_branch`)
+- Merge completed work back (`merge_worktree()` with optional `--squash`)
+- Clean up worktree on job completion or kill (`remove_worktree()`)
+
+The worktree path is stored in the job JSON so merge/cleanup can happen after the tmux session ends.
 
 ### Event Logging & Diagnostics
 

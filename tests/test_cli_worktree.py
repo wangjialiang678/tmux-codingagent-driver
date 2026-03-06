@@ -40,6 +40,7 @@ def _create_worktree_job() -> Job:
     job.cwd = "/repo-wt-test"
     job.worktree_path = "/repo-wt-test"
     job.worktree_branch = "tcd/test-branch"
+    job.worktree_repo_root = "/repo"
     mgr.save_job(job)
     return job
 
@@ -108,13 +109,106 @@ def test_start_wt_name_option(runner, tmp_jobs, monkeypatch):
     assert job.worktree_branch == "tcd/custom-name"
 
 
+def test_start_worktree_rolls_back_on_tmux_create_failure(runner, tmp_jobs, monkeypatch):
+    class FakeProvider:
+        tui_ready_indicator = "READY"
+
+        def check_cli(self):
+            return None
+
+        def build_launch_command(self, job):
+            return "fake-launch"
+
+        def build_prompt_wrapper(self, message, req_id):
+            return message
+
+    class FakeTmux:
+        def create_session(self, session, cmd, cwd):
+            return False
+
+    remove_worktree_mock = MagicMock()
+    delete_branch_mock = MagicMock()
+
+    monkeypatch.setattr("tcd.cli._get_tmux", lambda: FakeTmux())
+    monkeypatch.setattr("tcd.cli.get_provider", lambda provider: FakeProvider())
+    monkeypatch.setattr("tcd.worktree.is_git_repo", lambda _cwd: True)
+    monkeypatch.setattr("tcd.worktree.create_worktree", lambda _cwd, _name: Path("/tmp/repo-wt-rollback-create"))
+    monkeypatch.setattr("tcd.worktree.remove_worktree", remove_worktree_mock)
+    monkeypatch.setattr("tcd.worktree.delete_branch", delete_branch_mock)
+    monkeypatch.setattr("tcd.cli.subprocess.run", lambda *args, **kwargs: SimpleNamespace(stdout=""))
+
+    result = runner.invoke(
+        cli,
+        ["start", "-p", "codex", "-m", "hello", "-d", "/tmp", "--worktree", "--wt-name", "rollback-create"],
+    )
+    assert result.exit_code == 1
+
+    remove_worktree_mock.assert_called_once_with("/tmp/repo-wt-rollback-create")
+    delete_branch_mock.assert_called_once_with(Path("/tmp"), "tcd/rollback-create")
+    job = JobManager().list_jobs()[0]
+    assert job.status == "failed"
+    assert job.worktree_path is None
+    assert job.worktree_branch is None
+
+
+def test_start_worktree_rolls_back_on_prompt_send_failure(runner, tmp_jobs, monkeypatch):
+    class FakeProvider:
+        tui_ready_indicator = "READY"
+
+        def check_cli(self):
+            return None
+
+        def build_launch_command(self, job):
+            return "fake-launch"
+
+        def build_prompt_wrapper(self, message, req_id):
+            return message
+
+    class FakeTmux:
+        def create_session(self, session, cmd, cwd):
+            return True
+
+        def capture_pane(self, session):
+            return "READY"
+
+        def send_enter(self, session):
+            return True
+
+        def send_text(self, session, text):
+            return False
+
+    remove_worktree_mock = MagicMock()
+    delete_branch_mock = MagicMock()
+
+    monkeypatch.setattr("tcd.cli._get_tmux", lambda: FakeTmux())
+    monkeypatch.setattr("tcd.cli.get_provider", lambda provider: FakeProvider())
+    monkeypatch.setattr("tcd.worktree.is_git_repo", lambda _cwd: True)
+    monkeypatch.setattr("tcd.worktree.create_worktree", lambda _cwd, _name: Path("/tmp/repo-wt-rollback-send"))
+    monkeypatch.setattr("tcd.worktree.remove_worktree", remove_worktree_mock)
+    monkeypatch.setattr("tcd.worktree.delete_branch", delete_branch_mock)
+    monkeypatch.setattr("tcd.cli.subprocess.run", lambda *args, **kwargs: SimpleNamespace(stdout=""))
+    monkeypatch.setattr("tcd.cli.time.sleep", lambda _seconds: None)
+
+    result = runner.invoke(
+        cli,
+        ["start", "-p", "codex", "-m", "hello", "-d", "/tmp", "--worktree", "--wt-name", "rollback-send"],
+    )
+    assert result.exit_code == 1
+
+    remove_worktree_mock.assert_called_once_with("/tmp/repo-wt-rollback-send")
+    delete_branch_mock.assert_called_once_with(Path("/tmp"), "tcd/rollback-send")
+    job = JobManager().list_jobs()[0]
+    assert job.status == "failed"
+    assert job.worktree_path is None
+    assert job.worktree_branch is None
+
+
 def test_merge_command_success(runner, tmp_jobs, monkeypatch):
     job = _create_worktree_job()
     merge_branch_mock = MagicMock(return_value=True)
     remove_worktree_mock = MagicMock()
     delete_branch_mock = MagicMock()
 
-    monkeypatch.setattr("tcd.worktree.get_repo_root", lambda _cwd: Path("/repo"))
     monkeypatch.setattr("tcd.worktree.merge_branch", merge_branch_mock)
     monkeypatch.setattr("tcd.worktree.remove_worktree", remove_worktree_mock)
     monkeypatch.setattr("tcd.worktree.delete_branch", delete_branch_mock)
@@ -131,7 +225,6 @@ def test_merge_command_squash(runner, tmp_jobs, monkeypatch):
     job = _create_worktree_job()
     merge_branch_mock = MagicMock(return_value=True)
 
-    monkeypatch.setattr("tcd.worktree.get_repo_root", lambda _cwd: Path("/repo"))
     monkeypatch.setattr("tcd.worktree.merge_branch", merge_branch_mock)
     monkeypatch.setattr("tcd.worktree.remove_worktree", MagicMock())
     monkeypatch.setattr("tcd.worktree.delete_branch", MagicMock())
@@ -142,9 +235,25 @@ def test_merge_command_squash(runner, tmp_jobs, monkeypatch):
     assert "(squash)" in result.output
 
 
+def test_merge_command_squash_cleanup_forces_branch_delete(runner, tmp_jobs, monkeypatch):
+    job = _create_worktree_job()
+    merge_branch_mock = MagicMock(return_value=True)
+    remove_worktree_mock = MagicMock()
+    delete_branch_mock = MagicMock()
+
+    monkeypatch.setattr("tcd.worktree.merge_branch", merge_branch_mock)
+    monkeypatch.setattr("tcd.worktree.remove_worktree", remove_worktree_mock)
+    monkeypatch.setattr("tcd.worktree.delete_branch", delete_branch_mock)
+
+    result = runner.invoke(cli, ["merge", job.id, "--squash"])
+    assert result.exit_code == 0
+
+    remove_worktree_mock.assert_called_once_with("/repo-wt-test")
+    delete_branch_mock.assert_called_once_with(Path("/repo"), "tcd/test-branch", force=True)
+
+
 def test_merge_command_conflict(runner, tmp_jobs, monkeypatch):
     job = _create_worktree_job()
-    monkeypatch.setattr("tcd.worktree.get_repo_root", lambda _cwd: Path("/repo"))
     monkeypatch.setattr("tcd.worktree.merge_branch", lambda *args, **kwargs: False)
 
     result = runner.invoke(cli, ["merge", job.id])
@@ -156,7 +265,6 @@ def test_merge_command_no_cleanup(runner, tmp_jobs, monkeypatch):
     job = _create_worktree_job()
     remove_worktree_mock = MagicMock()
 
-    monkeypatch.setattr("tcd.worktree.get_repo_root", lambda _cwd: Path("/repo"))
     monkeypatch.setattr("tcd.worktree.merge_branch", lambda *args, **kwargs: True)
     monkeypatch.setattr("tcd.worktree.remove_worktree", remove_worktree_mock)
     monkeypatch.setattr("tcd.worktree.delete_branch", MagicMock())
@@ -164,6 +272,34 @@ def test_merge_command_no_cleanup(runner, tmp_jobs, monkeypatch):
     result = runner.invoke(cli, ["merge", job.id, "--no-cleanup"])
     assert result.exit_code == 0
     remove_worktree_mock.assert_not_called()
+
+
+def test_kill_cleans_worktree_and_branch(runner, tmp_jobs, monkeypatch):
+    job = _create_worktree_job()
+
+    class FakeTmux:
+        def session_exists(self, _session):
+            return True
+
+        def kill_session(self, _session):
+            return True
+
+    remove_worktree_mock = MagicMock()
+    delete_branch_mock = MagicMock()
+
+    monkeypatch.setattr("tcd.cli._get_tmux", lambda: FakeTmux())
+    monkeypatch.setattr("tcd.worktree.remove_worktree", remove_worktree_mock)
+    monkeypatch.setattr("tcd.worktree.delete_branch", delete_branch_mock)
+
+    result = runner.invoke(cli, ["kill", job.id])
+    assert result.exit_code == 0
+    remove_worktree_mock.assert_called_once_with("/repo-wt-test")
+    delete_branch_mock.assert_called_once_with(Path("/repo"), "tcd/test-branch")
+
+    updated = JobManager().load_job(job.id)
+    assert updated is not None
+    assert updated.worktree_path is None
+    assert updated.worktree_branch is None
 
 
 def test_help_contains_merge(runner):
