@@ -218,6 +218,7 @@ def test_merge_command_success(runner, tmp_jobs, tmp_path, monkeypatch):
     monkeypatch.setattr("tcd.worktree.merge_branch", merge_branch_mock)
     monkeypatch.setattr("tcd.worktree.remove_worktree", remove_worktree_mock)
     monkeypatch.setattr("tcd.worktree.delete_branch", delete_branch_mock)
+    monkeypatch.setattr("tcd.worktree.branch_has_new_commits", lambda *a, **kw: True)
 
     result = runner.invoke(cli, ["merge", job.id])
     assert result.exit_code == 0
@@ -239,6 +240,7 @@ def test_merge_command_squash(runner, tmp_jobs, tmp_path, monkeypatch):
     monkeypatch.setattr("tcd.worktree.merge_branch", merge_branch_mock)
     monkeypatch.setattr("tcd.worktree.remove_worktree", MagicMock())
     monkeypatch.setattr("tcd.worktree.delete_branch", MagicMock())
+    monkeypatch.setattr("tcd.worktree.branch_has_new_commits", lambda *a, **kw: True)
 
     result = runner.invoke(cli, ["merge", job.id, "--squash", "--no-cleanup"])
     assert result.exit_code == 0
@@ -260,6 +262,7 @@ def test_merge_command_squash_cleanup_forces_branch_delete(runner, tmp_jobs, tmp
     monkeypatch.setattr("tcd.worktree.merge_branch", merge_branch_mock)
     monkeypatch.setattr("tcd.worktree.remove_worktree", remove_worktree_mock)
     monkeypatch.setattr("tcd.worktree.delete_branch", delete_branch_mock)
+    monkeypatch.setattr("tcd.worktree.branch_has_new_commits", lambda *a, **kw: True)
 
     result = runner.invoke(cli, ["merge", job.id, "--squash"])
     assert result.exit_code == 0
@@ -276,6 +279,7 @@ def test_merge_command_conflict(runner, tmp_jobs, tmp_path, monkeypatch):
     job = _create_worktree_job(repo_root, worktree_path)
     monkeypatch.setattr("tcd.worktree.is_git_repo", lambda _path: True)
     monkeypatch.setattr("tcd.worktree.merge_branch", lambda *args, **kwargs: MergeResult(success=False, stderr="CONFLICT"))
+    monkeypatch.setattr("tcd.worktree.branch_has_new_commits", lambda *a, **kw: True)
 
     result = runner.invoke(cli, ["merge", job.id])
     assert result.exit_code != 0
@@ -294,10 +298,27 @@ def test_merge_command_no_cleanup(runner, tmp_jobs, tmp_path, monkeypatch):
     monkeypatch.setattr("tcd.worktree.merge_branch", lambda *args, **kwargs: MergeResult(success=True, stdout="Merge made"))
     monkeypatch.setattr("tcd.worktree.remove_worktree", remove_worktree_mock)
     monkeypatch.setattr("tcd.worktree.delete_branch", MagicMock())
+    monkeypatch.setattr("tcd.worktree.branch_has_new_commits", lambda *a, **kw: True)
 
     result = runner.invoke(cli, ["merge", job.id, "--no-cleanup"])
     assert result.exit_code == 0
     remove_worktree_mock.assert_not_called()
+
+
+def test_merge_command_no_new_commits(runner, tmp_jobs, tmp_path, monkeypatch):
+    """Merge should fail early when branch has no new commits (AI forgot to commit)."""
+    repo_root = tmp_path / "repo"
+    worktree_path = tmp_path / "repo-wt-test"
+    repo_root.mkdir()
+    worktree_path.mkdir()
+    job = _create_worktree_job(repo_root, worktree_path)
+
+    monkeypatch.setattr("tcd.worktree.is_git_repo", lambda _path: True)
+    monkeypatch.setattr("tcd.worktree.branch_has_new_commits", lambda *a, **kw: False)
+
+    result = runner.invoke(cli, ["merge", job.id])
+    assert result.exit_code != 0
+    assert "no new commits" in result.output
 
 
 def test_merge_command_falls_back_when_persisted_repo_root_invalid(runner, tmp_jobs, tmp_path, monkeypatch):
@@ -312,6 +333,7 @@ def test_merge_command_falls_back_when_persisted_repo_root_invalid(runner, tmp_j
     monkeypatch.setattr("tcd.worktree.merge_branch", merge_branch_mock)
     monkeypatch.setattr("tcd.worktree.remove_worktree", MagicMock())
     monkeypatch.setattr("tcd.worktree.delete_branch", MagicMock())
+    monkeypatch.setattr("tcd.worktree.branch_has_new_commits", lambda *a, **kw: True)
 
     result = runner.invoke(cli, ["merge", job.id, "--no-cleanup"])
 

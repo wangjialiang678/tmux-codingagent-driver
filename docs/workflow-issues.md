@@ -22,6 +22,10 @@
 | P1 | `worktree_repo_root` 字段未持久化到 job JSON（#2） | 已确认为版本问题，代码正确 |
 | P2 | Job 完成后 status 仍为 "running"（#2） | **已修复（merge 后自动更新 status）** |
 | P2 | `tcd merge` 成功消息与实际结果不一致（#2） | **已修复（MergeResult + noop 检测）** |
+| **P0** | **AI 在 worktree 中不 commit，merge 时 noop**（#3） | **已修复（Skill prompt + merge pre-check, 2026-03-09）** |
+| P1 | 自举场景：用旧版 tcd 修 tcd 自身（#3） | **已缓解（Skill 自举警告, 2026-03-09）** |
+| P2 | STALL/TURN0_STUCK 误报（AI 在生成长文本时）（#3） | **已修复（pane_hash 检测, 2026-03-09）** |
+| P2 | `tcd merge` 无法区分"无 commit"和"已 merge"（#3） | **已修复（branch_has_new_commits pre-check, 2026-03-09）** |
 
 ---
 
@@ -707,3 +711,108 @@ worktree_repo_root 未持久化（P1-3，可能是版本问题）
 - 相关 Job 记录：`~/.tcd/jobs/3b18e3c1.json`、`e76f3bcb.json`、`16370815.json`、`4af58644.json`
 - 源码：`src/tcd/cli.py:693-737`（merge 函数）、`src/tcd/worktree.py:100-161`（worktree 操作）、`src/tcd/job.py:36-74`（Job 数据模型）
 - 手动修复记录：feishu-cli 项目 git log（`git merge --no-ff tcd/3b18e3c1` 等 4 条）
+
+---
+---
+
+# 工作流问题分析报告 #3
+
+**日期**: 2026-03-09
+**来源**: tcd 自身 bug 修复 + Codex Code Review + 并行 worktree 修复工作流
+**场景**: 使用 tcd 驱动 Codex 审核并修复 tcd 自身的 worktree merge 代码
+
+---
+
+## 问题总览
+
+| 优先级 | 问题 | 状态 |
+|--------|------|------|
+| P0 | AI 在 worktree 中不 commit，导致 merge 时 "Already up to date" | 已修复（Skill prompt 指令 + merge pre-check） |
+| P1 | 自举场景：用旧版 tcd 修 tcd 自身，旧版包含正在修的 bug | 已缓解（Skill 自举警告） |
+| P2 | STALL/TURN0_STUCK 误报（AI 在生成长文本时） | 已修复（pane_hash 变化检测） |
+| P2 | merge 无法区分"无 commit"和"已合并" | 已修复（branch_has_new_commits pre-check） |
+
+---
+
+## 详细分析
+
+### P0-4: AI 在 worktree 中不 commit
+
+**问题描述**
+
+使用 `tcd start --worktree` 派发任务给 Codex。Codex 完成代码修改并通过测试，但没有执行 `git commit`。worktree 分支上没有新 commit。执行 `tcd merge` 时 `git merge` 返回 "Already up to date"（returncode=0），旧版 tcd 报告合并成功，实际无变化。cleanup 阶段删除 worktree 目录，AI 的修改永久丢失。
+
+**根因分析**
+
+tcd 的 worktree 功能假设 AI 会自行 commit 修改，但 Codex 在 full-auto 模式下默认不 commit。这是 tcd（传输层）和 Skill（编排层）之间的**契约缺失**：
+- tcd 提供 `create → merge → cleanup` 生命周期原语
+- Skill 负责在 prompt 中指导 AI 的行为（包括 commit）
+- 但 codex-worker Skill 之前没有包含 commit 指令
+
+**修复方案**（已实施）
+
+1. **Skill 层**（`codex-worker/skill.md`）：worktree 场景下 prompt 必须追加 commit 指令
+2. **tcd 层**（`worktree.py`）：新增 `branch_has_new_commits()` 函数，merge 前预检查
+3. **tcd 层**（`cli.py` + `sdk.py`）：merge 前调用 pre-check，无新 commit 时输出明确诊断信息并退出
+
+### P1-4: 自举场景——用旧版 tcd 修 tcd
+
+**问题描述**
+
+开发流程中使用 `tcd merge` 合并 Codex 修复的代码，但全局安装的 tcd 是旧版（包含 merge 假成功 bug）。结果：
+- Group B worktree 被旧版 `tcd merge` 的 cleanup 删除，代码丢失
+- 必须手动重新实现 Group B 的所有修改
+
+**缓解方案**（已实施）
+
+在 codex-worker Skill 注意事项中添加自举警告：当修改目标是 tcd 自身时，建议先手动合并再更新全局版本。
+
+### P2-6: STALL 误报
+
+**问题描述**
+
+Codex 在生成长文本（如代码审核报告）时，`tcd check` 连续 4 次检测到 `state=working`，span > 60s，触发 STALL 警告。但 AI 实际在正常工作，只是输出时间较长。
+
+**根因分析**
+
+原 STALL 规则只检查 `job.checked` 事件的 state 字段是否变化，不检查 pane 内容是否在更新。长时间 state=working 不等于卡住。
+
+**修复方案**（已实施）
+
+1. `cli.py` 和 `sdk.py` 的 check 流程在 state=working 时计算 pane 内容的 md5 hash，写入 `job.checked` 事件
+2. `diagnostics.py` R2 规则检查 `pane_hash`：如果 hash 在连续检查中变化，说明 AI 在活跃输出，不触发 STALL
+3. 向后兼容：无 hash 数据时（旧事件）仍按原逻辑触发
+
+### P2-7: merge 无法区分"无 commit"和"已合并"
+
+**问题描述**
+
+`git merge` 对于"分支无新 commit"和"分支已被合并"都返回 "Already up to date"（returncode=0）。之前的 noop 检测只能在 merge 后发现，无法在 merge 前区分两种情况。
+
+**修复方案**（已实施）
+
+新增 `branch_has_new_commits(repo_path, branch)` 函数，使用 `git log HEAD..branch` 预检查。merge 前调用，0 commit 时直接报错并提示用户检查 worktree。
+
+---
+
+## 责任边界分析
+
+本轮修复明确了 tcd 与 Skill 的责任边界：
+
+| 职责 | tcd（传输层） | Skill（编排层） |
+|------|--------------|----------------|
+| AI 必须 commit | 提供 pre-check 和清晰错误信息 | 在 prompt 中包含 commit 指令 |
+| 自举检测 | 不涉及 | 在注意事项中提醒 |
+| 卡住检测 | 用 pane_hash 区分真卡住和在工作 | 根据 STALL 警告决定是否干预 |
+| 分支检查 | 提供 `branch_has_new_commits()` | 不涉及 |
+
+**核心原则**：tcd 提供工具和信号，Skill 提供策略和决策。
+
+---
+
+## 参考
+
+- 修复 commit: 见 `git log --oneline -5` on main
+- 受影响文件: `src/tcd/worktree.py`, `src/tcd/cli.py`, `src/tcd/sdk.py`, `src/tcd/diagnostics.py`
+- 新增测试: `test_r2_stall_suppressed_when_pane_hash_changes`, `test_r2_stall_triggers_with_same_pane_hash`, `test_merge_command_no_new_commits`
+- Skill 更新: `~/.claude/skills/codex-worker/skill.md`

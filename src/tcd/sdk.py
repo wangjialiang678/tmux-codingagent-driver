@@ -256,7 +256,16 @@ class TCD:
                 emit(job.id, "job.turn_complete", turn=completed_turn, **({"tokens": result.tokens} if result.tokens else {}))
                 return CheckResult(state="context_limit")
 
-        emit(job.id, "job.checked", state="working")
+        # Include pane hash so STALL detection can distinguish active output from stuck
+        _pane_hash = None
+        try:
+            _pane_for_hash = self._tmux.capture_pane(job.tmux_session)
+            if _pane_for_hash:
+                import hashlib
+                _pane_hash = hashlib.md5(_pane_for_hash.encode()).hexdigest()[:8]
+        except Exception:
+            pass
+        emit(job.id, "job.checked", state="working", **({"pane_hash": _pane_hash} if _pane_hash else {}))
         return CheckResult(state="working")
 
     def check_with_diagnostics(self, job_id: str) -> DiagnosticCheckResult:
@@ -387,7 +396,7 @@ class TCD:
         """
         from pathlib import Path
 
-        from tcd.worktree import delete_branch, get_main_repo_root, is_git_repo, merge_branch, remove_worktree, stash_pop
+        from tcd.worktree import branch_has_new_commits, delete_branch, get_main_repo_root, is_git_repo, merge_branch, remove_worktree, stash_pop
 
         job = self._mgr.load_job(job_id)
         if job is None:
@@ -414,6 +423,12 @@ class TCD:
                 f"Cannot determine repo root for job {job_id}. "
                 f"Run manually: git merge --no-ff {job.worktree_branch}"
             )
+
+        # Pre-check: fail early if branch has no new commits
+        if not branch_has_new_commits(repo_root, job.worktree_branch):
+            logger.warning("merge %s: branch %s has no new commits (AI likely forgot to commit)", job.id, job.worktree_branch)
+            emit(job.id, "job.worktree_merged", success=False, reason="no_new_commits")
+            return False
 
         merge_result = merge_branch(repo_root, job.worktree_branch, strategy=strategy)
 

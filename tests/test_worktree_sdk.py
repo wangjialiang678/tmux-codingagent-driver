@@ -230,6 +230,7 @@ def test_merge_worktree_success(sdk, tmp_path):
 
     with (
         patch("tcd.worktree.is_git_repo", return_value=True),
+        patch("tcd.worktree.branch_has_new_commits", return_value=True),
         patch("tcd.worktree.merge_branch", return_value=MergeResult(success=True, stdout="Merge made")),
         patch("tcd.worktree.remove_worktree") as mock_remove,
         patch("tcd.worktree.delete_branch") as mock_delete,
@@ -254,6 +255,7 @@ def test_merge_worktree_conflict(sdk, tmp_path):
 
     with (
         patch("tcd.worktree.is_git_repo", return_value=True),
+        patch("tcd.worktree.branch_has_new_commits", return_value=True),
         patch("tcd.worktree.merge_branch", return_value=MergeResult(success=False, stderr="CONFLICT")),
         patch("tcd.worktree.remove_worktree") as mock_remove,
         patch("tcd.worktree.delete_branch") as mock_delete,
@@ -278,6 +280,7 @@ def test_merge_worktree_squash_cleanup_forces_branch_delete(sdk, tmp_path):
 
     with (
         patch("tcd.worktree.is_git_repo", return_value=True),
+        patch("tcd.worktree.branch_has_new_commits", return_value=True),
         patch("tcd.worktree.merge_branch", return_value=MergeResult(success=True, stdout="Merge made")),
         patch("tcd.worktree.remove_worktree"),
         patch("tcd.worktree.delete_branch") as mock_delete,
@@ -303,6 +306,7 @@ def test_merge_worktree_saves_completed_before_cleanup(sdk, tmp_path):
 
     with (
         patch("tcd.worktree.is_git_repo", return_value=True),
+        patch("tcd.worktree.branch_has_new_commits", return_value=True),
         patch("tcd.worktree.merge_branch", return_value=MergeResult(success=True, stdout="Merge made")),
         patch("tcd.worktree.remove_worktree", side_effect=_remove_worktree),
         patch("tcd.worktree.delete_branch"),
@@ -323,6 +327,7 @@ def test_merge_worktree_falls_back_when_persisted_repo_root_invalid(sdk, tmp_pat
 
     with (
         patch("tcd.worktree.get_main_repo_root", return_value=repo_root),
+        patch("tcd.worktree.branch_has_new_commits", return_value=True),
         patch("tcd.worktree.merge_branch", return_value=MergeResult(success=True, stdout="Merge made")) as mock_merge,
     ):
         merged = sdk.merge_worktree("test123", cleanup=False)
@@ -413,6 +418,7 @@ def test_worktree_merged_event(sdk, tmp_path):
 
     with (
         patch("tcd.worktree.is_git_repo", return_value=True),
+        patch("tcd.worktree.branch_has_new_commits", return_value=True),
         patch("tcd.worktree.merge_branch", return_value=MergeResult(success=True, stdout="Merge made")),
         patch("tcd.worktree.remove_worktree"),
         patch("tcd.worktree.delete_branch"),

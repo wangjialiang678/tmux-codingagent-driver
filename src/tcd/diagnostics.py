@@ -71,7 +71,7 @@ def diagnose(job: Job, pane_tail: str | None = None) -> list[Warning]:
     except Exception:
         logger.exception("R1 diagnostics failed for job %s", getattr(job, "id", "unknown"))
 
-    # R2: Stall detection
+    # R2: Stall detection (requires both state=working AND unchanged pane content)
     try:
         events = load_events(job.id)
         check_events = [entry for entry in events if entry.get("event") == "job.checked"]
@@ -80,13 +80,23 @@ def diagnose(job: Job, pane_tail: str | None = None) -> list[Warning]:
             if all(entry.get("state") == "working" for entry in recent):
                 span = _time_diff(str(recent[0].get("ts", "")), str(recent[-1].get("ts", "")))
                 if span > 60:
-                    warnings.append(
-                        Warning(
-                            code="STALL",
-                            message=f"No state change in {span:.0f}s ({len(recent)} checks)",
-                            severity="warn",
-                        )
+                    # Check if pane content has actually changed between checks.
+                    # If pane_hash is recorded and varies, the AI is actively generating
+                    # output (e.g. long text), so it's not truly stalled.
+                    hashes = [entry.get("pane_hash") for entry in recent]
+                    pane_unchanged = (
+                        all(h is not None for h in hashes)
+                        and len(set(hashes)) == 1
                     )
+                    if pane_unchanged or not any(h is not None for h in hashes):
+                        # Truly stalled (pane unchanged or no hash data for backward compat)
+                        warnings.append(
+                            Warning(
+                                code="STALL",
+                                message=f"No state change in {span:.0f}s ({len(recent)} checks)",
+                                severity="warn",
+                            )
+                        )
     except Exception:
         logger.exception("R2 diagnostics failed for job %s", getattr(job, "id", "unknown"))
 

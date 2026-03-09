@@ -223,6 +223,27 @@ def merge_branch(
     )
 
 
+def branch_has_new_commits(repo_path: str | Path, branch: str) -> bool:
+    """Check if branch has commits not reachable from HEAD.
+
+    Returns True if branch has diverged (has new commits to merge).
+    Returns False if branch is already fully merged (merge would be a noop).
+    """
+    # git log HEAD..branch --oneline: shows commits in branch but not in HEAD
+    result = subprocess.run(
+        ["git", "log", f"HEAD..{branch}", "--oneline", "--max-count=1"],
+        cwd=str(repo_path),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        # If the command fails (e.g. branch doesn't exist), assume there might be commits
+        # so we don't block the merge — let merge_branch() handle the error.
+        logger.warning("branch_has_new_commits: git log failed for branch=%s: %s", branch, result.stderr.strip())
+        return True
+    return bool(result.stdout.strip())
+
+
 def delete_branch(repo_path: str | Path, branch: str, *, force: bool = False) -> None:
     """Delete a local branch after merge."""
     delete_flag = "-D" if force else "-d"

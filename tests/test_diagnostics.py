@@ -104,6 +104,34 @@ def test_r2_stall_not_triggered(monkeypatch):
     assert not any(w.code == "STALL" for w in warnings)
 
 
+def test_r2_stall_suppressed_when_pane_hash_changes(monkeypatch):
+    """STALL should NOT trigger when pane content is changing (AI actively generating)."""
+    events = [
+        {"event": "job.checked", "state": "working", "ts": "2026-03-05T00:00:00+00:00", "pane_hash": "aabbccdd"},
+        {"event": "job.checked", "state": "working", "ts": "2026-03-05T00:00:30+00:00", "pane_hash": "11223344"},
+        {"event": "job.checked", "state": "working", "ts": "2026-03-05T00:01:05+00:00", "pane_hash": "55667788"},
+        {"event": "job.checked", "state": "working", "ts": "2026-03-05T00:01:20+00:00", "pane_hash": "99aabbcc"},
+    ]
+    monkeypatch.setattr("tcd.diagnostics.load_events", lambda _job_id: events)
+
+    warnings = diagnose(_job())
+    assert not any(w.code == "STALL" for w in warnings)
+
+
+def test_r2_stall_triggers_with_same_pane_hash(monkeypatch):
+    """STALL should trigger when pane content is unchanged (truly stuck)."""
+    events = [
+        {"event": "job.checked", "state": "working", "ts": "2026-03-05T00:00:00+00:00", "pane_hash": "deadbeef"},
+        {"event": "job.checked", "state": "working", "ts": "2026-03-05T00:00:30+00:00", "pane_hash": "deadbeef"},
+        {"event": "job.checked", "state": "working", "ts": "2026-03-05T00:01:05+00:00", "pane_hash": "deadbeef"},
+        {"event": "job.checked", "state": "working", "ts": "2026-03-05T00:01:20+00:00", "pane_hash": "deadbeef"},
+    ]
+    monkeypatch.setattr("tcd.diagnostics.load_events", lambda _job_id: events)
+
+    warnings = diagnose(_job())
+    assert any(w.code == "STALL" for w in warnings)
+
+
 def test_r3_permission_error_triggers(monkeypatch):
     _no_events(monkeypatch)
     pane_tail = "line1\nPermission denied\nline3"

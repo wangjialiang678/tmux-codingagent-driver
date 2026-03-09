@@ -439,7 +439,18 @@ def check(job_id: str, as_json: bool):
                 exit_code = 2
 
         if state == "working":
-            emit(job.id, "job.checked", state="working")
+            # Capture a pane hash so STALL detection can distinguish
+            # "AI actively generating output" from "AI truly stuck".
+            _pane_hash = None
+            try:
+                _tmux_for_hash = TmuxAdapter()
+                _pane_for_hash = _tmux_for_hash.capture_pane(job.tmux_session)
+                if _pane_for_hash:
+                    import hashlib
+                    _pane_hash = hashlib.md5(_pane_for_hash.encode()).hexdigest()[:8]
+            except Exception:
+                pass
+            emit(job.id, "job.checked", state="working", **({"pane_hash": _pane_hash} if _pane_hash else {}))
 
     if as_json:
         pane_tail = ""
@@ -708,7 +719,7 @@ def merge(job_id: str, squash: bool, no_cleanup: bool):
 
     from pathlib import Path
 
-    from tcd.worktree import delete_branch, get_main_repo_root, is_git_repo, merge_branch, remove_worktree, stash_pop
+    from tcd.worktree import branch_has_new_commits, delete_branch, get_main_repo_root, is_git_repo, merge_branch, remove_worktree, stash_pop
 
     # Determine repo_root with defensive fallback chain
     repo_root = None
@@ -741,6 +752,17 @@ def merge(job_id: str, squash: bool, no_cleanup: bool):
         sys.exit(1)
 
     strategy = "squash" if squash else "merge"
+
+    # Pre-check: warn early if branch has no new commits (common when AI forgets to commit)
+    if not branch_has_new_commits(repo_root, job.worktree_branch):
+        click.echo(f"Warning: '{job.worktree_branch}' has no new commits relative to HEAD.", err=True)
+        click.echo("The AI agent likely forgot to commit its changes. Check the worktree:", err=True)
+        if job.worktree_path:
+            click.echo(f"  cd {job.worktree_path} && git status", err=True)
+        click.echo(f"  git log {job.worktree_branch} --oneline -5", err=True)
+        emit(job.id, "job.worktree_merged", success=False, reason="no_new_commits")
+        sys.exit(1)
+
     logger.info("merge %s: merging branch=%s strategy=%s repo_root=%s", job.id, job.worktree_branch, strategy, repo_root)
     merge_result = merge_branch(repo_root, job.worktree_branch, strategy=strategy)
 
