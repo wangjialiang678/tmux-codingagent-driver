@@ -382,7 +382,7 @@ class TCD:
         """
         from pathlib import Path
 
-        from tcd.worktree import delete_branch, get_main_repo_root, merge_branch, remove_worktree
+        from tcd.worktree import delete_branch, get_main_repo_root, is_git_repo, merge_branch, remove_worktree
 
         job = self._mgr.load_job(job_id)
         if job is None:
@@ -393,8 +393,10 @@ class TCD:
         # Determine repo_root with defensive fallback
         repo_root = None
         if job.worktree_repo_root:
-            repo_root = Path(job.worktree_repo_root)
-        else:
+            candidate = Path(job.worktree_repo_root)
+            if candidate.exists() and is_git_repo(candidate):
+                repo_root = candidate
+        if repo_root is None:
             for candidate in [job.worktree_path, job.cwd]:
                 if candidate and Path(candidate).exists():
                     try:
@@ -424,6 +426,7 @@ class TCD:
         if job.status == "running":
             job.status = "completed"
             job.completed_at = _now_iso()
+            self._mgr.save_job(job)
 
         if cleanup:
             if job.worktree_path:

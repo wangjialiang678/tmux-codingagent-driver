@@ -705,16 +705,25 @@ def merge(job_id: str, squash: bool, no_cleanup: bool):
 
     from pathlib import Path
 
-    from tcd.worktree import delete_branch, get_main_repo_root, merge_branch, remove_worktree, stash_pop
+    from tcd.worktree import delete_branch, get_main_repo_root, is_git_repo, merge_branch, remove_worktree, stash_pop
 
     # Determine repo_root with defensive fallback chain
     repo_root = None
     if job.worktree_repo_root:
-        # Trust the persisted repo root (set at worktree creation time)
-        repo_root = Path(job.worktree_repo_root)
-    else:
+        candidate = Path(job.worktree_repo_root)
+        if candidate.exists() and is_git_repo(candidate):
+            repo_root = candidate
+        else:
+            logger.warning(
+                "merge %s: invalid persisted worktree_repo_root=%s, falling back to path derivation",
+                job.id,
+                candidate,
+            )
+
+    if repo_root is None:
         # Fallback: try to derive from worktree path or cwd
-        logger.warning("merge %s: worktree_repo_root not set, falling back to path derivation", job.id)
+        if not job.worktree_repo_root:
+            logger.warning("merge %s: worktree_repo_root not set, falling back to path derivation", job.id)
         for candidate in [job.worktree_path, job.cwd]:
             if candidate and Path(candidate).exists():
                 try:
