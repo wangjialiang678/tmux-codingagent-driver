@@ -34,14 +34,14 @@ def tmp_jobs(tmp_path, monkeypatch):
     return jobs_dir
 
 
-def _create_worktree_job() -> Job:
+def _create_worktree_job(repo_root: Path, worktree_path: Path, *, persisted_repo_root: Path | None = None) -> Job:
     mgr = JobManager()
-    job = mgr.create_job("codex", "test prompt", "/repo")
+    job = mgr.create_job("codex", "test prompt", str(repo_root))
     job.status = "running"
-    job.cwd = "/repo-wt-test"
-    job.worktree_path = "/repo-wt-test"
+    job.cwd = str(worktree_path)
+    job.worktree_path = str(worktree_path)
     job.worktree_branch = "tcd/test-branch"
-    job.worktree_repo_root = "/repo"
+    job.worktree_repo_root = str(persisted_repo_root or repo_root)
     mgr.save_job(job)
     return job
 
@@ -204,12 +204,17 @@ def test_start_worktree_rolls_back_on_prompt_send_failure(runner, tmp_jobs, monk
     assert job.worktree_branch is None
 
 
-def test_merge_command_success(runner, tmp_jobs, monkeypatch):
-    job = _create_worktree_job()
+def test_merge_command_success(runner, tmp_jobs, tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    worktree_path = tmp_path / "repo-wt-test"
+    repo_root.mkdir()
+    worktree_path.mkdir()
+    job = _create_worktree_job(repo_root, worktree_path)
     merge_branch_mock = MagicMock(return_value=MergeResult(success=True, stdout="Merge made by the 'ort' strategy."))
     remove_worktree_mock = MagicMock()
     delete_branch_mock = MagicMock()
 
+    monkeypatch.setattr("tcd.worktree.is_git_repo", lambda _path: True)
     monkeypatch.setattr("tcd.worktree.merge_branch", merge_branch_mock)
     monkeypatch.setattr("tcd.worktree.remove_worktree", remove_worktree_mock)
     monkeypatch.setattr("tcd.worktree.delete_branch", delete_branch_mock)
@@ -218,30 +223,40 @@ def test_merge_command_success(runner, tmp_jobs, monkeypatch):
     assert result.exit_code == 0
     assert "Merged" in result.output
 
-    remove_worktree_mock.assert_called_once_with("/repo-wt-test")
-    delete_branch_mock.assert_called_once_with(Path("/repo"), "tcd/test-branch")
+    remove_worktree_mock.assert_called_once_with(str(worktree_path))
+    delete_branch_mock.assert_called_once_with(repo_root, "tcd/test-branch")
 
 
-def test_merge_command_squash(runner, tmp_jobs, monkeypatch):
-    job = _create_worktree_job()
+def test_merge_command_squash(runner, tmp_jobs, tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    worktree_path = tmp_path / "repo-wt-test"
+    repo_root.mkdir()
+    worktree_path.mkdir()
+    job = _create_worktree_job(repo_root, worktree_path)
     merge_branch_mock = MagicMock(return_value=MergeResult(success=True, stdout="Squash commit"))
 
+    monkeypatch.setattr("tcd.worktree.is_git_repo", lambda _path: True)
     monkeypatch.setattr("tcd.worktree.merge_branch", merge_branch_mock)
     monkeypatch.setattr("tcd.worktree.remove_worktree", MagicMock())
     monkeypatch.setattr("tcd.worktree.delete_branch", MagicMock())
 
     result = runner.invoke(cli, ["merge", job.id, "--squash", "--no-cleanup"])
     assert result.exit_code == 0
-    merge_branch_mock.assert_called_once_with(Path("/repo"), "tcd/test-branch", strategy="squash")
+    merge_branch_mock.assert_called_once_with(repo_root, "tcd/test-branch", strategy="squash")
     assert "(squash)" in result.output
 
 
-def test_merge_command_squash_cleanup_forces_branch_delete(runner, tmp_jobs, monkeypatch):
-    job = _create_worktree_job()
+def test_merge_command_squash_cleanup_forces_branch_delete(runner, tmp_jobs, tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    worktree_path = tmp_path / "repo-wt-test"
+    repo_root.mkdir()
+    worktree_path.mkdir()
+    job = _create_worktree_job(repo_root, worktree_path)
     merge_branch_mock = MagicMock(return_value=MergeResult(success=True, stdout="Squash commit"))
     remove_worktree_mock = MagicMock()
     delete_branch_mock = MagicMock()
 
+    monkeypatch.setattr("tcd.worktree.is_git_repo", lambda _path: True)
     monkeypatch.setattr("tcd.worktree.merge_branch", merge_branch_mock)
     monkeypatch.setattr("tcd.worktree.remove_worktree", remove_worktree_mock)
     monkeypatch.setattr("tcd.worktree.delete_branch", delete_branch_mock)
@@ -249,12 +264,17 @@ def test_merge_command_squash_cleanup_forces_branch_delete(runner, tmp_jobs, mon
     result = runner.invoke(cli, ["merge", job.id, "--squash"])
     assert result.exit_code == 0
 
-    remove_worktree_mock.assert_called_once_with("/repo-wt-test")
-    delete_branch_mock.assert_called_once_with(Path("/repo"), "tcd/test-branch", force=True)
+    remove_worktree_mock.assert_called_once_with(str(worktree_path))
+    delete_branch_mock.assert_called_once_with(repo_root, "tcd/test-branch", force=True)
 
 
-def test_merge_command_conflict(runner, tmp_jobs, monkeypatch):
-    job = _create_worktree_job()
+def test_merge_command_conflict(runner, tmp_jobs, tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    worktree_path = tmp_path / "repo-wt-test"
+    repo_root.mkdir()
+    worktree_path.mkdir()
+    job = _create_worktree_job(repo_root, worktree_path)
+    monkeypatch.setattr("tcd.worktree.is_git_repo", lambda _path: True)
     monkeypatch.setattr("tcd.worktree.merge_branch", lambda *args, **kwargs: MergeResult(success=False, stderr="CONFLICT"))
 
     result = runner.invoke(cli, ["merge", job.id])
@@ -262,10 +282,15 @@ def test_merge_command_conflict(runner, tmp_jobs, monkeypatch):
     assert "Merge conflict" in result.output
 
 
-def test_merge_command_no_cleanup(runner, tmp_jobs, monkeypatch):
-    job = _create_worktree_job()
+def test_merge_command_no_cleanup(runner, tmp_jobs, tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    worktree_path = tmp_path / "repo-wt-test"
+    repo_root.mkdir()
+    worktree_path.mkdir()
+    job = _create_worktree_job(repo_root, worktree_path)
     remove_worktree_mock = MagicMock()
 
+    monkeypatch.setattr("tcd.worktree.is_git_repo", lambda _path: True)
     monkeypatch.setattr("tcd.worktree.merge_branch", lambda *args, **kwargs: MergeResult(success=True, stdout="Merge made"))
     monkeypatch.setattr("tcd.worktree.remove_worktree", remove_worktree_mock)
     monkeypatch.setattr("tcd.worktree.delete_branch", MagicMock())
@@ -275,8 +300,31 @@ def test_merge_command_no_cleanup(runner, tmp_jobs, monkeypatch):
     remove_worktree_mock.assert_not_called()
 
 
-def test_kill_cleans_worktree_and_branch(runner, tmp_jobs, monkeypatch):
-    job = _create_worktree_job()
+def test_merge_command_falls_back_when_persisted_repo_root_invalid(runner, tmp_jobs, tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    worktree_path = tmp_path / "repo-wt-test"
+    repo_root.mkdir()
+    worktree_path.mkdir()
+    job = _create_worktree_job(repo_root, worktree_path, persisted_repo_root=tmp_path / "missing-repo")
+    merge_branch_mock = MagicMock(return_value=MergeResult(success=True, stdout="Merge made"))
+
+    monkeypatch.setattr("tcd.worktree.get_main_repo_root", lambda _path: repo_root)
+    monkeypatch.setattr("tcd.worktree.merge_branch", merge_branch_mock)
+    monkeypatch.setattr("tcd.worktree.remove_worktree", MagicMock())
+    monkeypatch.setattr("tcd.worktree.delete_branch", MagicMock())
+
+    result = runner.invoke(cli, ["merge", job.id, "--no-cleanup"])
+
+    assert result.exit_code == 0
+    merge_branch_mock.assert_called_once_with(repo_root, "tcd/test-branch", strategy="merge")
+
+
+def test_kill_cleans_worktree_and_branch(runner, tmp_jobs, tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    worktree_path = tmp_path / "repo-wt-test"
+    repo_root.mkdir()
+    worktree_path.mkdir()
+    job = _create_worktree_job(repo_root, worktree_path)
 
     class FakeTmux:
         def session_exists(self, _session):
@@ -294,8 +342,8 @@ def test_kill_cleans_worktree_and_branch(runner, tmp_jobs, monkeypatch):
 
     result = runner.invoke(cli, ["kill", job.id])
     assert result.exit_code == 0
-    remove_worktree_mock.assert_called_once_with("/repo-wt-test")
-    delete_branch_mock.assert_called_once_with(Path("/repo"), "tcd/test-branch")
+    remove_worktree_mock.assert_called_once_with(str(worktree_path))
+    delete_branch_mock.assert_called_once_with(repo_root, "tcd/test-branch")
 
     updated = JobManager().load_job(job.id)
     assert updated is not None
