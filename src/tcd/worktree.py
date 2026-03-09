@@ -124,15 +124,15 @@ def create_worktree(repo_path: str | Path, branch_name: str) -> Path:
     return wt_path
 
 
-def remove_worktree(worktree_path: str | Path) -> None:
+def remove_worktree(worktree_path: str | Path) -> bool:
     """Remove a worktree and prune.
 
-    Handles the case where the worktree directory was already deleted
-    (e.g. by concurrent cleanup or manual removal).
+    Returns True if the worktree was successfully removed (or was already gone).
+    Returns False if git worktree remove failed (callers should skip branch cleanup).
     """
     wt = Path(worktree_path)
     if not wt.exists():
-        return
+        return True  # Already gone = success
 
     try:
         common_dir_result = subprocess.run(
@@ -144,11 +144,11 @@ def remove_worktree(worktree_path: str | Path) -> None:
     except FileNotFoundError:
         # Directory disappeared between exists() check and subprocess call
         logger.warning("Worktree %s disappeared during cleanup", wt)
-        return
+        return True  # Already gone = success
 
     if common_dir_result.returncode != 0:
         logger.warning("Unable to locate repo for worktree %s, skipping removal", wt)
-        return
+        return False
 
     common_dir = Path(common_dir_result.stdout.strip())
     if not common_dir.is_absolute():
@@ -161,7 +161,8 @@ def remove_worktree(worktree_path: str | Path) -> None:
         capture_output=True,
         text=True,
     )
-    if result.returncode != 0:
+    remove_succeeded = result.returncode == 0
+    if not remove_succeeded:
         logger.warning("git worktree remove failed: %s", result.stderr.strip())
 
     prune = subprocess.run(
@@ -172,6 +173,8 @@ def remove_worktree(worktree_path: str | Path) -> None:
     )
     if prune.returncode != 0:
         logger.warning("git worktree prune failed: %s", prune.stderr.strip())
+
+    return remove_succeeded
 
 
 class MergeResult:

@@ -247,12 +247,15 @@ def start(
 
                 repo_root = Path(job.worktree_repo_root) if job.worktree_repo_root else get_main_repo_root(job.cwd)
                 worktree_path = job.worktree_path
-                remove_worktree(worktree_path)
-                delete_branch(repo_root, job.worktree_branch)
-                emit(job.id, "job.worktree_removed", worktree_path=worktree_path)
-                job.worktree_path = None
-                job.worktree_branch = None
-                mgr.save_job(job)
+                cleaned = remove_worktree(worktree_path)
+                if cleaned:
+                    delete_branch(repo_root, job.worktree_branch)
+                    emit(job.id, "job.worktree_removed", worktree_path=worktree_path)
+                    job.worktree_path = None
+                    job.worktree_branch = None
+                    mgr.save_job(job)
+                else:
+                    logger.warning("start %s: worktree removal failed during rollback, skipping branch cleanup", job.id)
             except Exception:
                 logger.warning("start %s: failed to rollback worktree setup", job.id, exc_info=True)
 
@@ -767,16 +770,20 @@ def merge(job_id: str, squash: bool, no_cleanup: bool):
 
     if not no_cleanup and job.worktree_path:
         try:
-            remove_worktree(job.worktree_path)
-            if strategy == "squash":
-                delete_branch(repo_root, job.worktree_branch, force=True)
+            cleaned = remove_worktree(job.worktree_path)
+            if cleaned:
+                if strategy == "squash":
+                    delete_branch(repo_root, job.worktree_branch, force=True)
+                else:
+                    delete_branch(repo_root, job.worktree_branch)
+                emit(job.id, "job.worktree_removed", worktree_path=job.worktree_path)
+                job.worktree_path = None
+                job.worktree_branch = None
+                mgr.save_job(job)
+                click.echo("Worktree cleaned up.")
             else:
-                delete_branch(repo_root, job.worktree_branch)
-            emit(job.id, "job.worktree_removed", worktree_path=job.worktree_path)
-            job.worktree_path = None
-            job.worktree_branch = None
-            mgr.save_job(job)
-            click.echo("Worktree cleaned up.")
+                logger.warning("merge %s: worktree removal failed, skipping branch cleanup", job.id)
+                click.echo("Warning: worktree removal failed, skipping branch cleanup.", err=True)
         except Exception as exc:
             logger.warning("merge %s: cleanup failed", job.id, exc_info=True)
             click.echo(f"Warning: merge succeeded but cleanup failed: {exc}", err=True)
@@ -856,14 +863,17 @@ def _kill_job(job: Job, tmux: TmuxAdapter, mgr: JobManager) -> None:
 
             repo_root = Path(job.worktree_repo_root) if job.worktree_repo_root else get_main_repo_root(job.cwd)
 
-            remove_worktree(job.worktree_path)
-            if job.worktree_branch:
-                delete_branch(repo_root, job.worktree_branch)
-            logger.info("kill %s: worktree removed at %s", job.id, job.worktree_path)
-            emit(job.id, "job.worktree_removed", worktree_path=job.worktree_path)
-            job.worktree_path = None
-            job.worktree_branch = None
-            mgr.save_job(job)
+            cleaned = remove_worktree(job.worktree_path)
+            if cleaned:
+                if job.worktree_branch:
+                    delete_branch(repo_root, job.worktree_branch)
+                logger.info("kill %s: worktree removed at %s", job.id, job.worktree_path)
+                emit(job.id, "job.worktree_removed", worktree_path=job.worktree_path)
+                job.worktree_path = None
+                job.worktree_branch = None
+                mgr.save_job(job)
+            else:
+                logger.warning("kill %s: worktree removal failed, skipping branch cleanup for %s", job.id, job.worktree_path)
         except Exception:
             logger.warning("kill %s: failed to remove worktree at %s", job.id, job.worktree_path, exc_info=True)
     emit(job.id, "job.killed", reason="user")

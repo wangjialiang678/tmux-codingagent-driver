@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -16,6 +17,7 @@ from tcd.provider import get_provider
 from tcd.tmux_adapter import TmuxAdapter, TmuxNotFoundError
 
 _MARKER_PROVIDERS = {"claude", "gemini"}
+logger = logging.getLogger(__name__)
 
 
 class TCDError(Exception):
@@ -190,12 +192,15 @@ class TCD:
 
                     repo_root = Path(job.worktree_repo_root) if job.worktree_repo_root else get_main_repo_root(job.cwd)
                     worktree_path = job.worktree_path
-                    remove_worktree(worktree_path)
-                    delete_branch(repo_root, job.worktree_branch)
-                    emit(job.id, "job.worktree_removed", worktree_path=worktree_path)
-                    job.worktree_path = None
-                    job.worktree_branch = None
-                    self._mgr.save_job(job)
+                    cleaned = remove_worktree(worktree_path)
+                    if cleaned:
+                        delete_branch(repo_root, job.worktree_branch)
+                        emit(job.id, "job.worktree_removed", worktree_path=worktree_path)
+                        job.worktree_path = None
+                        job.worktree_branch = None
+                        self._mgr.save_job(job)
+                    else:
+                        logger.warning("start %s: worktree removal failed during rollback, skipping branch cleanup", job.id)
                 except Exception:
                     pass  # best-effort rollback
 
@@ -382,7 +387,7 @@ class TCD:
         """
         from pathlib import Path
 
-        from tcd.worktree import delete_branch, get_main_repo_root, is_git_repo, merge_branch, remove_worktree
+        from tcd.worktree import delete_branch, get_main_repo_root, is_git_repo, merge_branch, remove_worktree, stash_pop
 
         job = self._mgr.load_job(job_id)
         if job is None:
@@ -430,14 +435,21 @@ class TCD:
 
         if cleanup:
             if job.worktree_path:
-                remove_worktree(job.worktree_path)
-                emit(job.id, "job.worktree_removed", worktree_path=job.worktree_path)
-            if strategy == "squash":
-                delete_branch(repo_root, job.worktree_branch, force=True)
-            else:
-                delete_branch(repo_root, job.worktree_branch)
-            job.worktree_path = None
-            job.worktree_branch = None
+                cleaned = remove_worktree(job.worktree_path)
+                if cleaned:
+                    emit(job.id, "job.worktree_removed", worktree_path=job.worktree_path)
+                    if strategy == "squash":
+                        delete_branch(repo_root, job.worktree_branch, force=True)
+                    else:
+                        delete_branch(repo_root, job.worktree_branch)
+                    job.worktree_path = None
+                    job.worktree_branch = None
+                else:
+                    logger.warning("merge %s: worktree removal failed, skipping branch cleanup", job.id)
+
+        if job.worktree_stash_ref:
+            if not stash_pop(repo_root):
+                logger.warning("merge %s: stash pop failed, ref=%s", job.id, job.worktree_stash_ref)
 
         self._mgr.save_job(job)
 
@@ -467,13 +479,16 @@ class TCD:
 
                 repo_root = Path(job.worktree_repo_root) if job.worktree_repo_root else get_main_repo_root(job.cwd)
 
-                remove_worktree(job.worktree_path)
-                if job.worktree_branch:
-                    delete_branch(repo_root, job.worktree_branch)
-                emit(job.id, "job.worktree_removed", worktree_path=job.worktree_path)
-                job.worktree_path = None
-                job.worktree_branch = None
-                self._mgr.save_job(job)
+                cleaned = remove_worktree(job.worktree_path)
+                if cleaned:
+                    if job.worktree_branch:
+                        delete_branch(repo_root, job.worktree_branch)
+                    emit(job.id, "job.worktree_removed", worktree_path=job.worktree_path)
+                    job.worktree_path = None
+                    job.worktree_branch = None
+                    self._mgr.save_job(job)
+                else:
+                    logger.warning("kill %s: worktree removal failed, skipping branch cleanup for %s", job.id, job.worktree_path)
             except Exception:
                 pass  # best-effort cleanup
         emit(job.id, "job.killed", reason="user")
