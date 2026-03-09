@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class WorktreeError(Exception):
@@ -122,19 +125,30 @@ def create_worktree(repo_path: str | Path, branch_name: str) -> Path:
 
 
 def remove_worktree(worktree_path: str | Path) -> None:
-    """Remove a worktree and prune."""
+    """Remove a worktree and prune.
+
+    Handles the case where the worktree directory was already deleted
+    (e.g. by concurrent cleanup or manual removal).
+    """
     wt = Path(worktree_path)
     if not wt.exists():
         return
 
-    common_dir_result = subprocess.run(
-        ["git", "rev-parse", "--git-common-dir"],
-        cwd=str(wt),
-        capture_output=True,
-        text=True,
-    )
+    try:
+        common_dir_result = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=str(wt),
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        # Directory disappeared between exists() check and subprocess call
+        logger.warning("Worktree %s disappeared during cleanup", wt)
+        return
+
     if common_dir_result.returncode != 0:
-        raise WorktreeError(f"Unable to locate repo for worktree: {wt}")
+        logger.warning("Unable to locate repo for worktree %s, skipping removal", wt)
+        return
 
     common_dir = Path(common_dir_result.stdout.strip())
     if not common_dir.is_absolute():
@@ -148,7 +162,7 @@ def remove_worktree(worktree_path: str | Path) -> None:
         text=True,
     )
     if result.returncode != 0:
-        raise WorktreeError(f"git worktree remove failed: {result.stderr.strip()}")
+        logger.warning("git worktree remove failed: %s", result.stderr.strip())
 
     prune = subprocess.run(
         ["git", "worktree", "prune"],
@@ -157,7 +171,20 @@ def remove_worktree(worktree_path: str | Path) -> None:
         text=True,
     )
     if prune.returncode != 0:
-        raise WorktreeError(f"git worktree prune failed: {prune.stderr.strip()}")
+        logger.warning("git worktree prune failed: %s", prune.stderr.strip())
+
+
+class MergeResult:
+    """Result of a merge_branch() call."""
+
+    def __init__(self, success: bool, *, noop: bool = False, stdout: str = "", stderr: str = ""):
+        self.success = success
+        self.noop = noop  # True when "Already up to date"
+        self.stdout = stdout
+        self.stderr = stderr
+
+    def __bool__(self) -> bool:
+        return self.success
 
 
 def merge_branch(
@@ -165,10 +192,10 @@ def merge_branch(
     branch: str,
     *,
     strategy: str = "merge",  # "merge" | "squash"
-) -> bool:
+) -> MergeResult:
     """Merge a branch into the current HEAD.
 
-    Returns True on success, False on conflict.
+    Returns MergeResult with success/noop/stdout info.
     Does NOT auto-resolve conflicts.
     """
     if strategy not in {"merge", "squash"}:
@@ -184,7 +211,13 @@ def merge_branch(
         capture_output=True,
         text=True,
     )
-    return result.returncode == 0
+    noop = "Already up to date" in result.stdout
+    return MergeResult(
+        success=result.returncode == 0,
+        noop=noop,
+        stdout=result.stdout.strip(),
+        stderr=result.stderr.strip(),
+    )
 
 
 def delete_branch(repo_path: str | Path, branch: str, *, force: bool = False) -> None:

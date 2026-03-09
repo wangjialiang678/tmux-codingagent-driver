@@ -9,6 +9,7 @@ import pytest
 
 from tcd.job import Job
 from tcd.sdk import TCD, TCDError
+from tcd.worktree import MergeResult
 
 
 def _provider_mock() -> MagicMock:
@@ -215,7 +216,7 @@ def test_merge_worktree_success(sdk):
     sdk._mgr.load_job.return_value = job
 
     with (
-        patch("tcd.worktree.merge_branch", return_value=True),
+        patch("tcd.worktree.merge_branch", return_value=MergeResult(success=True, stdout="Merge made")),
         patch("tcd.worktree.remove_worktree") as mock_remove,
         patch("tcd.worktree.delete_branch") as mock_delete,
     ):
@@ -244,7 +245,7 @@ def test_merge_worktree_conflict(sdk):
     sdk._mgr.load_job.return_value = job
 
     with (
-        patch("tcd.worktree.merge_branch", return_value=False),
+        patch("tcd.worktree.merge_branch", return_value=MergeResult(success=False, stderr="CONFLICT")),
         patch("tcd.worktree.remove_worktree") as mock_remove,
         patch("tcd.worktree.delete_branch") as mock_delete,
     ):
@@ -273,7 +274,7 @@ def test_merge_worktree_squash_cleanup_forces_branch_delete(sdk):
     sdk._mgr.load_job.return_value = job
 
     with (
-        patch("tcd.worktree.merge_branch", return_value=True),
+        patch("tcd.worktree.merge_branch", return_value=MergeResult(success=True, stdout="Merge made")),
         patch("tcd.worktree.remove_worktree"),
         patch("tcd.worktree.delete_branch") as mock_delete,
     ):
@@ -370,7 +371,7 @@ def test_worktree_merged_event(sdk):
     sdk._mgr.load_job.return_value = job
 
     with (
-        patch("tcd.worktree.merge_branch", return_value=True),
+        patch("tcd.worktree.merge_branch", return_value=MergeResult(success=True, stdout="Merge made")),
         patch("tcd.worktree.remove_worktree"),
         patch("tcd.worktree.delete_branch"),
         patch("tcd.sdk.emit") as mock_emit,

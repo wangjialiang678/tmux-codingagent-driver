@@ -227,6 +227,8 @@ def start(
 
         click.echo(f"Job started: {job.id}")
         click.echo(f"Provider: {provider}")
+        if job.sandbox:
+            click.echo(f"Sandbox: {job.sandbox}")
         click.echo(f"tmux session: {job.tmux_session}")
     except Exception as exc:
         if job.status != "failed":
@@ -705,20 +707,54 @@ def merge(job_id: str, squash: bool, no_cleanup: bool):
 
     from tcd.worktree import delete_branch, get_main_repo_root, merge_branch, remove_worktree, stash_pop
 
-    repo_root = Path(job.worktree_repo_root) if job.worktree_repo_root else get_main_repo_root(job.cwd)
-    strategy = "squash" if squash else "merge"
-    logger.info("merge %s: merging branch=%s strategy=%s", job.id, job.worktree_branch, strategy)
-    success = merge_branch(repo_root, job.worktree_branch, strategy=strategy)
+    # Determine repo_root with defensive fallback chain
+    repo_root = None
+    if job.worktree_repo_root:
+        # Trust the persisted repo root (set at worktree creation time)
+        repo_root = Path(job.worktree_repo_root)
+    else:
+        # Fallback: try to derive from worktree path or cwd
+        logger.warning("merge %s: worktree_repo_root not set, falling back to path derivation", job.id)
+        for candidate in [job.worktree_path, job.cwd]:
+            if candidate and Path(candidate).exists():
+                try:
+                    repo_root = get_main_repo_root(candidate)
+                    break
+                except Exception:
+                    continue
 
-    if not success:
+    if repo_root is None:
+        click.echo("Error: cannot determine repo root (worktree may be deleted).", err=True)
+        click.echo(f"Run manually: git merge --no-ff {job.worktree_branch}", err=True)
+        sys.exit(1)
+
+    strategy = "squash" if squash else "merge"
+    logger.info("merge %s: merging branch=%s strategy=%s repo_root=%s", job.id, job.worktree_branch, strategy, repo_root)
+    merge_result = merge_branch(repo_root, job.worktree_branch, strategy=strategy)
+
+    if not merge_result.success:
         logger.warning("merge %s: conflict on branch=%s", job.id, job.worktree_branch)
         click.echo(f"Merge conflict on {job.worktree_branch}. Resolve manually.", err=True)
         emit(job.id, "job.worktree_merged", success=False, strategy=strategy)
         sys.exit(1)
 
+    if merge_result.noop:
+        click.echo(f"Warning: '{job.worktree_branch}' is already up to date — no changes merged.", err=True)
+        click.echo(f"Verify branch has commits: git log {job.worktree_branch} --oneline -5", err=True)
+        emit(job.id, "job.worktree_merged", success=True, strategy=strategy, noop=True)
+        sys.exit(1)
+
     emit(job.id, "job.worktree_merged", success=True, strategy=strategy)
     logger.info("merge %s: success, cleanup=%s", job.id, not no_cleanup)
     click.echo(f"Merged {job.worktree_branch} ({strategy}).")
+    if merge_result.stdout:
+        click.echo(merge_result.stdout)
+
+    # Mark job as completed after successful merge
+    if job.status == "running":
+        job.status = "completed"
+        job.completed_at = _now_iso()
+        mgr.save_job(job)
 
     if not no_cleanup and job.worktree_path:
         try:

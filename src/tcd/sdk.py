@@ -390,14 +390,40 @@ class TCD:
         if not job.worktree_branch:
             raise TCDError(f"Job {job_id} has no worktree")
 
-        repo_root = Path(job.worktree_repo_root) if job.worktree_repo_root else get_main_repo_root(job.cwd)
-        success = merge_branch(repo_root, job.worktree_branch, strategy=strategy)
+        # Determine repo_root with defensive fallback
+        repo_root = None
+        if job.worktree_repo_root:
+            repo_root = Path(job.worktree_repo_root)
+        else:
+            for candidate in [job.worktree_path, job.cwd]:
+                if candidate and Path(candidate).exists():
+                    try:
+                        repo_root = get_main_repo_root(candidate)
+                        break
+                    except Exception:
+                        continue
+        if repo_root is None:
+            raise TCDError(
+                f"Cannot determine repo root for job {job_id}. "
+                f"Run manually: git merge --no-ff {job.worktree_branch}"
+            )
 
-        if not success:
+        merge_result = merge_branch(repo_root, job.worktree_branch, strategy=strategy)
+
+        if not merge_result.success:
             emit(job.id, "job.worktree_merged", success=False, strategy=strategy)
             return False
 
+        if merge_result.noop:
+            emit(job.id, "job.worktree_merged", success=True, strategy=strategy, noop=True)
+            return False
+
         emit(job.id, "job.worktree_merged", success=True, strategy=strategy)
+
+        # Mark job as completed after successful merge
+        if job.status == "running":
+            job.status = "completed"
+            job.completed_at = _now_iso()
 
         if cleanup:
             if job.worktree_path:
@@ -409,7 +435,8 @@ class TCD:
                 delete_branch(repo_root, job.worktree_branch)
             job.worktree_path = None
             job.worktree_branch = None
-            self._mgr.save_job(job)
+
+        self._mgr.save_job(job)
 
         return True
 

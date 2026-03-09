@@ -10,14 +10,18 @@
 
 | 优先级 | 问题 | 状态 |
 |--------|------|------|
-| P0 | M-6: `--sandbox` 参数是死代码，未传入 provider | 已确认，待修复 |
-| P0 | Codex 自动更新中断正在运行的任务 | 未解决 |
+| P0 | M-6: `--sandbox` 参数是死代码，未传入 provider | 已修复（codex.py + start 输出显示 sandbox） |
+| P0 | Codex 自动更新中断正在运行的任务 | 未解决（外部问题） |
 | P1 | `tcd wait` 阻塞 Claude Code 进程，用户无进展反馈 | Skill 已更新（待验证） |
-| P1 | 缺少前置写权限检查，修复任务白白消耗 token | 未解决 |
+| P1 | 缺少前置写权限检查，修复任务白白消耗 token | 未解决（Skill 层改进） |
 | P2 | review 任务 vs 修复任务沙箱模式不可区分 | 未解决 |
 | P2 | 非 git 仓库无法用 git diff 检查 Codex 改动 | 未解决 |
 | P2 | Codex 路径空格导致 shell 命令失败 | Codex 自行规避 |
 | P3 | Skill 轮询模式实际效果未验证 | 待观察 |
+| **P0** | **`tcd merge` worktree 不存在时 FileNotFoundError + 假成功**（#2） | **已修复（2026-03-09）** |
+| P1 | `worktree_repo_root` 字段未持久化到 job JSON（#2） | 已确认为版本问题，代码正确 |
+| P2 | Job 完成后 status 仍为 "running"（#2） | **已修复（merge 后自动更新 status）** |
+| P2 | `tcd merge` 成功消息与实际结果不一致（#2） | **已修复（MergeResult + noop 检测）** |
 
 ---
 
@@ -326,3 +330,380 @@ M-6（sandbox 参数未传入）
 - 工作流日志：`docs/workflow-log.md`
 - Codex provider 源码：`src/tcd/providers/codex.py`
 - Codex Worker Skill：`~/.claude/skills/codex-worker/SKILL.md`
+
+---
+---
+
+# 工作流问题分析报告 #2
+
+**日期**: 2026-03-08
+**来源**: feishu-cli auto-dev 工作流（2026-03-08 22:40–23:30）
+**场景**: 使用 tcd 并行 worktree 模式为 feishu-cli 项目开发 8 个新 CLI 功能
+**涉及 Job**: 3b18e3c1（Group A: export+import）, e76f3bcb（Group B: copy+move+folder）, 16370815（Group C: bitable-search+bitable-delete）, 4af58644（Group D: wiki-spaces）
+
+---
+
+## 问题总览（按优先级排序）
+
+| 优先级 | 问题 | 状态 |
+|--------|------|------|
+| P0 | `tcd merge` 在 worktree 目录不存在时报 FileNotFoundError，但误报合并成功 | 未解决 |
+| P1 | `tcd merge` cleanup 阶段 `remove_worktree` 找不到已消失的 worktree 目录 | 未解决（P0 的子问题） |
+| P1 | `worktree_repo_root` 字段未持久化到 job JSON | 待确认 |
+| P2 | Job 完成后 status 仍为 "running"，`completed_at` 为 null | 未解决 |
+| P2 | `tcd merge` 成功消息与实际结果不一致（用户被误导） | 未解决 |
+
+---
+
+## 详细分析
+
+---
+
+### P0-3: `tcd merge` FileNotFoundError + 假成功
+
+**问题描述**
+
+在 feishu-cli 项目（路径 `/Users/michael/projects/组件模块/feishu-cli`）中，使用 `tcd start --worktree` 启动 4 个并行 Codex 任务。所有任务编码完成并提交到各自的 `tcd/<job_id>` 分支。之后执行 `tcd merge <job_id>` 时：
+
+1. 命令输出了 `"Merged tcd/3b18e3c1 (merge)."` 成功消息
+2. 紧接着抛出 `FileNotFoundError: No such file or directory` 指向 worktree 路径
+3. **实际检查 main 分支发现：代码并未被合并**
+4. 手动执行 `git merge --no-ff tcd/3b18e3c1` 才真正完成合并
+
+4 个 Job 全部复现此问题，100% 触发率。
+
+**复现步骤**
+
+```bash
+# 1. 在含中文路径的 repo 中启动 worktree 任务
+cd /Users/michael/projects/组件模块/feishu-cli
+tcd start -p codex -m "..." --worktree
+# Job: 3b18e3c1, worktree: /Users/michael/projects/组件模块/feishu-cli-wt-3b18e3c1
+
+# 2. 等待 Codex 完成编码（status 检查显示 turn_state: idle）
+
+# 3. 执行 merge
+tcd merge 3b18e3c1
+# 输出: "Merged tcd/3b18e3c1 (merge)."
+# 然后: FileNotFoundError: [Errno 2] No such file or directory: '/Users/michael/projects/组件模块/feishu-cli-wt-3b18e3c1'
+
+# 4. 检查 main 分支 — 代码未合并
+git log --oneline -3  # 看不到 merge commit
+
+# 5. 手动 merge 成功
+git merge --no-ff tcd/3b18e3c1  # 正常合并，无冲突
+```
+
+**根因分析**
+
+问题出在 `cli.py:693-737` 的 `merge()` 函数，分两层：
+
+**层 1：`repo_root` 计算可能指向错误目录**
+
+```python
+# cli.py L708
+repo_root = Path(job.worktree_repo_root) if job.worktree_repo_root else get_main_repo_root(job.cwd)
+```
+
+- `job.worktree_repo_root`：在 job JSON 中**缺失**（见下方 P1-3），导致走 fallback 路径
+- `get_main_repo_root(job.cwd)` 中 `job.cwd` = worktree 路径 `/Users/michael/projects/组件模块/feishu-cli-wt-3b18e3c1`
+- 如果 worktree 目录已被清理，`subprocess.run(cwd=str(path))` 会抛 `FileNotFoundError`
+- 如果 worktree 目录仍存在但 git 状态异常，`get_main_repo_root` 可能返回错误的 repo root
+- `merge_branch()` 在错误的 repo root 下执行 `git merge`，可能是 no-op（already up to date），returncode=0，误报成功
+
+**层 2：cleanup 阶段缺少防御**
+
+```python
+# cli.py L723-725
+if not no_cleanup and job.worktree_path:
+    try:
+        remove_worktree(job.worktree_path)  # FileNotFoundError 在这里抛出
+```
+
+`remove_worktree()` 在 `worktree.py:124-127` 中：
+```python
+def remove_worktree(worktree_path):
+    wt = Path(worktree_path)
+    if not wt.exists():
+        return  # 这行应该防御了，但 FileNotFoundError 仍然抛出
+```
+
+说明 `wt.exists()` 返回 True（目录存在）但后续的 `subprocess.run(cwd=str(wt))` 时目录被并发删除，或者 `common_dir_result` 的 `subprocess.run` 的 `cwd` 解析失败。
+
+**实际 Job 数据证据**
+
+从 `~/.tcd/jobs/3b18e3c1.json` 可以看到：
+
+```json
+{
+  "cwd": "/Users/michael/projects/组件模块/feishu-cli-wt-3b18e3c1",
+  "worktree_path": "/Users/michael/projects/组件模块/feishu-cli-wt-3b18e3c1",
+  "worktree_branch": "tcd/3b18e3c1",
+  "status": "running",          // ← 应该是 completed
+  "completed_at": null           // ← 应该有时间戳
+  // 注意：没有 worktree_repo_root 字段！
+}
+```
+
+**影响评估**
+- 严重程度：**阻塞级**（merge 假成功导致用户以为代码已合并，实际未合并）
+- 频率：100%（所有 4 个 job 全部触发）
+- 波及：需要手动 `git merge --no-ff` 补救，增加约 10 分钟手动操作。如果用户未手动检查，可能导致代码丢失
+
+**推荐修复方案**
+
+方案 A（推荐，分 3 步）：
+
+1. **修复 `repo_root` 计算逻辑**（`cli.py:708`）：
+
+```python
+# 优先用 worktree_repo_root（主仓库原始路径）
+if job.worktree_repo_root:
+    repo_root = Path(job.worktree_repo_root)
+elif job.worktree_path and Path(job.worktree_path).exists():
+    repo_root = get_main_repo_root(job.worktree_path)
+else:
+    # worktree 已不存在，尝试从 branch name 推断原始 repo
+    # 或者直接报错让用户手动 merge
+    click.echo(f"Error: worktree at {job.worktree_path} no longer exists.", err=True)
+    click.echo(f"Manual merge: git merge --no-ff {job.worktree_branch}", err=True)
+    sys.exit(1)
+```
+
+2. **合并后验证**（`cli.py:719` 后添加）：
+
+```python
+# 验证 merge 确实生效：检查 branch 的 HEAD 是否是当前 HEAD 的祖先
+verify = subprocess.run(
+    ["git", "merge-base", "--is-ancestor", job.worktree_branch, "HEAD"],
+    cwd=str(repo_root), capture_output=True
+)
+if verify.returncode != 0:
+    click.echo(f"Warning: merge may not have taken effect. Verify with: git log --oneline -5", err=True)
+```
+
+3. **cleanup 防御加强**（`worktree.py:remove_worktree`）：
+
+```python
+def remove_worktree(worktree_path):
+    wt = Path(worktree_path)
+    if not wt.exists():
+        return  # 已不存在，静默返回
+    try:
+        # ... 现有逻辑 ...
+    except (FileNotFoundError, WorktreeError):
+        # worktree 在检查后被并发删除，忽略
+        logger.warning("Worktree %s disappeared during cleanup", wt)
+```
+
+方案 B（最小改动应急）：
+
+在 `merge()` 函数开头就计算并验证 `repo_root`，如果无法获取则提示手动命令后退出：
+
+```python
+def merge(job_id, squash, no_cleanup):
+    # ... load job ...
+
+    # 计算 repo_root，优先用持久化的原始路径
+    repo_root = None
+    if job.worktree_repo_root:
+        repo_root = Path(job.worktree_repo_root)
+    else:
+        # Fallback: 从 worktree_path 推导
+        wt = Path(job.worktree_path) if job.worktree_path else None
+        if wt and wt.exists():
+            repo_root = get_main_repo_root(str(wt))
+        elif job.cwd and Path(job.cwd).exists():
+            repo_root = get_main_repo_root(job.cwd)
+
+    if repo_root is None or not repo_root.exists():
+        click.echo(f"Error: cannot determine repo root. Worktree may be deleted.", err=True)
+        click.echo(f"Run manually: git merge --no-ff {job.worktree_branch}", err=True)
+        sys.exit(1)
+```
+
+**优先级**: P0
+
+---
+
+### P1-3: `worktree_repo_root` 字段未持久化到 Job JSON
+
+**问题描述**
+
+`Job` dataclass 在 `job.py:57` 定义了 `worktree_repo_root: str | None = None`，且 `cli.py:142` 在创建 worktree 后正确设置了 `job.worktree_repo_root = cwd`。但实际保存的 job JSON 中此字段**缺失**。
+
+**证据**
+
+4 个 job 的 JSON 文件中都没有 `worktree_repo_root` 字段：
+
+```bash
+# 检查所有 4 个相关 job
+grep -l "worktree_repo_root" ~/.tcd/jobs/{3b18e3c1,e76f3bcb,16370815,4af58644}.json
+# 无输出 — 字段不存在
+```
+
+但 `Job.to_dict()` 使用 `dataclasses.asdict()` 应该序列化所有字段，包括值为 None 的。
+
+**根因分析**
+
+两种可能：
+
+1. **版本不一致**：用户通过 `uv tool install .` 安装了 tcd，但安装的版本可能早于添加 `worktree_repo_root` 字段的提交。源码已有此字段，但运行时的 `tcd` 可执行文件是旧版本。这意味着 `cli.py:142` 中的 `job.worktree_repo_root = cwd` 实际上只是在运行时对象上设了一个非 dataclass 字段的属性，`asdict()` 不会序列化它。
+
+2. **`save_job` 时序问题**：`worktree_repo_root` 在 `save_job` 之前被设置（`cli.py:142-149`），所以理论上应该被保存。如果是旧版本问题，则 `save_job` 调用的 `to_dict()` 不包含此字段。
+
+**验证方法**
+
+```bash
+# 检查安装的 tcd 版本是否包含 worktree_repo_root
+python3 -c "from tcd.job import Job; print('worktree_repo_root' in Job.__dataclass_fields__)"
+
+# 检查源码版本
+grep worktree_repo_root src/tcd/job.py
+```
+
+**影响评估**
+- 严重程度：**高**（直接导致 P0-3，merge 时无法找到正确的 repo root）
+- 频率：100%（如果确实是版本问题，所有 worktree job 都受影响）
+
+**推荐修复方案**
+
+1. 确认安装版本：`tcd --version` vs `git log --oneline -1 src/tcd/job.py`
+2. 如果版本不一致：重新安装 `uv tool install . --force`
+3. 添加版本校验：在 `tcd start --worktree` 中打印 job 保存后的字段列表（debug 级别），确认 `worktree_repo_root` 被序列化
+4. 长期：在 `merge()` 函数中添加对 `worktree_repo_root is None` 的明确警告
+
+**优先级**: P1
+
+---
+
+### P2-4: Job 完成后 status 仍为 "running"
+
+**问题描述**
+
+4 个 Codex job 全部完成编码并提交了 commit，但 job JSON 中 `status` 仍然是 `"running"`，`completed_at` 为 `null`。
+
+**证据**
+
+```json
+// ~/.tcd/jobs/3b18e3c1.json
+{
+  "status": "running",
+  "completed_at": null,
+  "turn_count": 1,
+  "turn_state": "idle",
+  "last_agent_message": "Implemented scripts/export.js and scripts/import.js..."
+}
+```
+
+`turn_state: "idle"` 和有效的 `last_agent_message` 表明 Codex 确实完成了任务，但 job 状态未被更新为 `"completed"`。
+
+**根因分析**
+
+`tcd start` 命令中的 wait 循环（`cli.py` 的 start 函数）负责检测任务完成并更新状态。可能的原因：
+
+1. `tcd start` 命令的 wait 阶段在检测到完成之前就被外部中断（调用者 Ctrl-C 或 timeout）
+2. 完成信号文件（`.tcd/jobs/<id>.turn-complete`）的检测逻辑与 Codex 的实际完成信号不匹配
+3. 后台运行的 `tcd start` 进程在 Claude Code 上下文压缩后丢失
+
+**影响评估**
+- 严重程度：**中**（不影响合并，但导致 `tcd status` 显示不准确，且 auto-cleanup 逻辑不会触发）
+- 频率：需进一步调查（可能与 tcd 被作为后台进程调用有关）
+
+**推荐修复方案**
+
+1. `tcd merge` 和 `tcd output` 中检测到 `turn_state == "idle"` 且 `last_agent_message` 非空时，自动将状态更新为 `"completed"`
+2. `tcd check` 命令增加对实际完成但状态未更新的检测（从 tmux session 状态推断）
+3. 添加 `tcd fix-status <job_id>` 子命令，手动触发状态修正
+
+**优先级**: P2
+
+---
+
+### P2-5: `tcd merge` 成功消息与实际结果不一致
+
+**问题描述**
+
+`tcd merge` 输出 `"Merged tcd/3b18e3c1 (merge)."` 但代码并未实际合并到 main 分支。用户收到成功消息后认为合并完成，直到后续操作发现代码缺失才意识到问题。
+
+**根因分析**
+
+`cli.py:711` 中 `merge_branch()` 返回 `True`（`git merge` returncode=0），但可能的情况：
+- `git merge` 在错误的 `repo_root` 下执行，结果是 "Already up to date"（returncode=0 但无实际合并）
+- 或者 merge 确实在某个目录下成功了，但那不是用户期望的 main 分支
+
+`merge_branch()` 只检查 returncode，不验证是否真的产生了 merge commit：
+
+```python
+# worktree.py:181-187
+result = subprocess.run(cmd, cwd=str(repo_path), capture_output=True, text=True)
+return result.returncode == 0  # "Already up to date" 也返回 0！
+```
+
+**推荐修复方案**
+
+1. `merge_branch()` 检查 stdout 是否包含 "Already up to date"，如果是则返回特殊状态
+2. merge 成功后验证：检查 `git log -1 --format=%H` 是否变化
+3. 输出更详细的信息：`"Merged tcd/xxx (merge): 3 files changed, 204 insertions(+)"`
+
+**优先级**: P2
+
+---
+
+## 根因链
+
+```
+worktree_repo_root 未持久化（P1-3，可能是版本问题）
+    → merge() 无法获取原始 repo 路径
+    → fallback 到 get_main_repo_root(job.cwd)
+    → job.cwd 指向 worktree 路径（可能已不存在或状态异常）
+        → 情况 A：目录不存在 → FileNotFoundError
+        → 情况 B：目录存在但 repo_root 计算错误 → git merge 在错误目录执行
+            → "Already up to date" → returncode=0 → 误报成功
+                → 用户以为合并完成，实际代码未合并
+    → cleanup 阶段 remove_worktree 再次触发 FileNotFoundError
+```
+
+辅助因素：
+- Job status 未正确更新为 completed（P2-4），导致 auto-cleanup 未触发
+- merge 成功消息缺乏验证（P2-5），用户被误导
+
+---
+
+## 行动项
+
+### 立即执行（P0）
+
+- [ ] 验证安装版本 vs 源码版本：`python3 -c "from tcd.job import Job; print(Job.__dataclass_fields__.keys())"` 并对比源码
+- [ ] 如版本不一致，重新安装：`cd ~/projects/AI\ 工作流/tmux-codingagent-driver && uv tool install . --force`
+- [ ] 在 `merge()` 函数中：fallback 到 `worktree_repo_root` 失败时，打印手动 merge 命令而非假成功
+- [ ] `merge_branch()` 返回后验证 merge 确实生效（用 `git merge-base --is-ancestor` 或检查 HEAD 变化）
+
+### 短期（P1，本周）
+
+- [ ] `merge()` 中对 `worktree_repo_root is None` 添加 warning 日志
+- [ ] `remove_worktree()` 添加 try/except 防御，目录消失时不抛异常
+- [ ] `merge_branch()` 区分 "Already up to date" 和真正的合并成功
+- [ ] merge 成功后输出 `git diff --stat` 摘要
+
+### 中期（P2，下个迭代）
+
+- [ ] `tcd check` 增加对 "实际完成但状态未更新" 的检测和自动修正
+- [ ] `tcd merge` 增加 `--dry-run` 模式，显示将要执行的操作但不实际执行
+- [ ] 添加集成测试：在含非 ASCII 路径（如中文）的 repo 中执行完整 worktree 生命周期
+
+---
+
+## 复现环境
+
+- macOS Darwin 24.6.0
+- tcd 源码版本：v0.3.0（`~/projects/AI 工作流/tmux-codingagent-driver`）
+- 项目路径：`/Users/michael/projects/组件模块/feishu-cli`（注意中文 `组件模块`）
+- Codex provider
+- 4 个并行 worktree job 同时触发
+
+## 参考
+
+- 相关 Job 记录：`~/.tcd/jobs/3b18e3c1.json`、`e76f3bcb.json`、`16370815.json`、`4af58644.json`
+- 源码：`src/tcd/cli.py:693-737`（merge 函数）、`src/tcd/worktree.py:100-161`（worktree 操作）、`src/tcd/job.py:36-74`（Job 数据模型）
+- 手动修复记录：feishu-cli 项目 git log（`git merge --no-ff tcd/3b18e3c1` 等 4 条）

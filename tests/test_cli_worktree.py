@@ -11,6 +11,7 @@ from click.testing import CliRunner
 
 from tcd.cli import cli
 from tcd.job import Job, JobManager
+from tcd.worktree import MergeResult
 
 
 @pytest.fixture()
@@ -205,7 +206,7 @@ def test_start_worktree_rolls_back_on_prompt_send_failure(runner, tmp_jobs, monk
 
 def test_merge_command_success(runner, tmp_jobs, monkeypatch):
     job = _create_worktree_job()
-    merge_branch_mock = MagicMock(return_value=True)
+    merge_branch_mock = MagicMock(return_value=MergeResult(success=True, stdout="Merge made by the 'ort' strategy."))
     remove_worktree_mock = MagicMock()
     delete_branch_mock = MagicMock()
 
@@ -223,7 +224,7 @@ def test_merge_command_success(runner, tmp_jobs, monkeypatch):
 
 def test_merge_command_squash(runner, tmp_jobs, monkeypatch):
     job = _create_worktree_job()
-    merge_branch_mock = MagicMock(return_value=True)
+    merge_branch_mock = MagicMock(return_value=MergeResult(success=True, stdout="Squash commit"))
 
     monkeypatch.setattr("tcd.worktree.merge_branch", merge_branch_mock)
     monkeypatch.setattr("tcd.worktree.remove_worktree", MagicMock())
@@ -237,7 +238,7 @@ def test_merge_command_squash(runner, tmp_jobs, monkeypatch):
 
 def test_merge_command_squash_cleanup_forces_branch_delete(runner, tmp_jobs, monkeypatch):
     job = _create_worktree_job()
-    merge_branch_mock = MagicMock(return_value=True)
+    merge_branch_mock = MagicMock(return_value=MergeResult(success=True, stdout="Squash commit"))
     remove_worktree_mock = MagicMock()
     delete_branch_mock = MagicMock()
 
@@ -254,7 +255,7 @@ def test_merge_command_squash_cleanup_forces_branch_delete(runner, tmp_jobs, mon
 
 def test_merge_command_conflict(runner, tmp_jobs, monkeypatch):
     job = _create_worktree_job()
-    monkeypatch.setattr("tcd.worktree.merge_branch", lambda *args, **kwargs: False)
+    monkeypatch.setattr("tcd.worktree.merge_branch", lambda *args, **kwargs: MergeResult(success=False, stderr="CONFLICT"))
 
     result = runner.invoke(cli, ["merge", job.id])
     assert result.exit_code != 0
@@ -265,7 +266,7 @@ def test_merge_command_no_cleanup(runner, tmp_jobs, monkeypatch):
     job = _create_worktree_job()
     remove_worktree_mock = MagicMock()
 
-    monkeypatch.setattr("tcd.worktree.merge_branch", lambda *args, **kwargs: True)
+    monkeypatch.setattr("tcd.worktree.merge_branch", lambda *args, **kwargs: MergeResult(success=True, stdout="Merge made"))
     monkeypatch.setattr("tcd.worktree.remove_worktree", remove_worktree_mock)
     monkeypatch.setattr("tcd.worktree.delete_branch", MagicMock())
 
