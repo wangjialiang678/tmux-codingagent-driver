@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.3.1 — 2026-03-09
+
+Worktree 健壮性修复轮次，5 个 commit 集中解决合并安全性与 STALL 误报问题。详见 `docs/workflow-issues.md`。
+
+### Worktree Merge 健壮性
+
+- **防假成功**: `merge_worktree` 在 merge 前校验工作区干净，检测 noop merge（分支无新 commit）并显式标记，避免"成功但没合进来"
+- **并发清理防御**: `remove_worktree` 返回 bool 状态，重复调用安全；所有 caller 统一处理 cleanup 失败路径
+- **SDK stash_pop 修复**: 合并过程中 SDK 的 stash_pop 时机修正，防止脏工作区吞掉用户未提交变更
+- **worktree_repo_root 校验**: cli.py / sdk.py 先校验路径合法再使用，统一 status 持久化时机
+
+### Merge Pre-check
+
+- `tcd merge` 合并前执行冲突预检测（`git merge --no-commit --no-ff` 干跑），提前报告冲突而非中途失败
+- 预检测失败时保留 worktree，方便人工介入
+
+### Diagnostics: STALL 误报修复
+
+- `STALL` 规则增加 "turn in progress" 豁免条件：turn_count > 0 且 elapsed < 新阈值时不再误报
+- `TURN0_STUCK` 阈值从 120s 保留，STALL 阈值调整后减少长任务误杀
+- 新增 28 个诊断测试用例覆盖 STALL 边界
+
+### 文档
+
+- 新增 `docs/workflow-issues.md`：汇总 worktree 实战中遇到的问题及修复路径，作为后续回归基线
+- 新增 `docs/feature-request-parallel-batch-start.md`：`tcd batch` 并行批量启动命令的 v0.4.0 提案
+- 新增 `docs/example-batch-tasks.json`：batch 命令的示例任务定义
+
+### 测试
+
+- 新增 worktree CLI/SDK 测试 + 诊断测试（total diagnostics +28）
+- 总测试数: 223 → 280+
+
+---
+
 ## v0.3.0 — 2026-03-05
 
 Git worktree 并行隔离、增量输出、活动提取、日志系统。

@@ -1,0 +1,17 @@
+{
+  "context_file": "docs/design/mcp-server-technical-design.md",
+  "tasks": [
+    {
+      "name": "group-a",
+      "prompt": "Implement the following MCP tools in mcp/tools/: feishu_read_doc, feishu_search_docs, feishu_upload_markdown, feishu_export_doc, feishu_beautify_doc. Follow the tool interface defined in the context doc. Each tool goes in its own file under mcp/tools/<tool_name>.py. Add corresponding API wrapper functions in api/docx.py if they don't exist. Write unit tests in tests/tools/test_group_a.py."
+    },
+    {
+      "name": "group-b",
+      "prompt": "Implement the following MCP tools in mcp/tools/: feishu_bitable_search, feishu_bitable_write, feishu_bitable_get_meta, feishu_list_folder. Follow the tool interface defined in the context doc. Each tool goes in its own file under mcp/tools/<tool_name>.py. Add corresponding API wrapper functions in api/bitable.py and api/drive.py if they don't exist. Write unit tests in tests/tools/test_group_b.py."
+    },
+    {
+      "name": "group-c",
+      "prompt": "Implement the following MCP tools in mcp/tools/: feishu_set_permission, feishu_delete_doc, feishu_check_scopes, feishu_read_message. Follow the tool interface defined in the context doc. Each tool goes in its own file under mcp/tools/<tool_name>.py. Add corresponding API wrapper functions in api/drive.py and api/im.py if they don't exist. Write unit tests in tests/tools/test_group_c.py."
+    }
+  ]
+}
