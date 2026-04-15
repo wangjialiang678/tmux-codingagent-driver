@@ -23,10 +23,24 @@ tcd launches AI coding agents in detached tmux sessions, injects prompts, detect
 
 - Python 3.10+
 - tmux (`brew install tmux` on macOS)
-- At least one AI CLI tool installed:
-  - [Codex](https://github.com/openai/codex) — `npm install -g @openai/codex`
-  - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — `npm install -g @anthropic-ai/claude-code`
-  - [Gemini CLI](https://github.com/google-gemini/gemini-cli) — `npm install -g @anthropic-ai/gemini-cli`
+- At least one AI CLI tool installed **and logged in** before `tcd start`:
+  - [Codex](https://github.com/openai/codex) — `npm install -g @openai/codex` → then `codex login`
+  - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — `npm install -g @anthropic-ai/claude-code` → then `claude` once to trust folder
+  - [Gemini CLI](https://github.com/google-gemini/gemini-cli) — `npm install -g @google/gemini-cli` → then `gemini` once to auth
+
+### Provider auth notes
+
+- **Codex CLI** defaults to **ChatGPT Plus/Pro/Team subscription** auth (not API key). You must run `codex login` interactively once — it opens a browser and links your ChatGPT account. Credentials are cached in `~/.codex/auth.json`. Without this, tcd worktree jobs will hang at the login prompt and get killed by `TURN0_STUCK`. If you don't have a ChatGPT subscription, you can instead export `OPENAI_API_KEY=sk-...` (pay-per-token).
+- **Claude Code** requires completing the folder-trust dialog once. `tcd` auto-handles the trust prompt via its Provider trust dialog handler, but first-time auth (Anthropic account login) must be done manually.
+- **Gemini CLI** similarly requires initial Google account auth and may show a folder-trust dialog — tcd handles the latter automatically.
+
+Verify before first tcd run:
+
+```bash
+codex whoami && echo "codex ok"
+claude --version && echo "claude ok"
+gemini --version && echo "gemini ok"
+```
 
 ## Installation
 
