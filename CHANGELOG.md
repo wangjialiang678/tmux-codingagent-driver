@@ -2,181 +2,181 @@
 
 ## v0.3.1 — 2026-03-09
 
-Worktree 健壮性修复轮次，5 个 commit 集中解决合并安全性与 STALL 误报问题。详见 `docs/workflow-issues.md`。
+Worktree robustness fix round: 5 commits focused on merge safety and STALL false-positive issues. See `docs/workflow-issues.md` for details.
 
-### Worktree Merge 健壮性
+### Worktree Merge Robustness
 
-- **防假成功**: `merge_worktree` 在 merge 前校验工作区干净，检测 noop merge（分支无新 commit）并显式标记，避免"成功但没合进来"
-- **并发清理防御**: `remove_worktree` 返回 bool 状态，重复调用安全；所有 caller 统一处理 cleanup 失败路径
-- **SDK stash_pop 修复**: 合并过程中 SDK 的 stash_pop 时机修正，防止脏工作区吞掉用户未提交变更
-- **worktree_repo_root 校验**: cli.py / sdk.py 先校验路径合法再使用，统一 status 持久化时机
+- **Prevent false success**: `merge_worktree` now validates a clean working tree before merging, detects noop merges (no new commits on branch), and marks them explicitly — eliminating "reported success but nothing was merged"
+- **Concurrent cleanup defense**: `remove_worktree` returns a bool status; repeated calls are safe; all callers now handle cleanup failure paths uniformly
+- **SDK stash_pop fix**: corrected the timing of stash_pop during merge to prevent dirty working tree from swallowing uncommitted user changes
+- **`worktree_repo_root` validation**: `cli.py` / `sdk.py` now validate the path before use; unified the timing of status persistence
 
 ### Merge Pre-check
 
-- `tcd merge` 合并前执行冲突预检测（`git merge --no-commit --no-ff` 干跑），提前报告冲突而非中途失败
-- 预检测失败时保留 worktree，方便人工介入
+- `tcd merge` runs a conflict pre-detection dry-run (`git merge --no-commit --no-ff`) before the actual merge, reporting conflicts upfront rather than failing mid-way
+- Worktree is preserved on pre-check failure to allow manual intervention
 
-### Diagnostics: STALL 误报修复
+### Diagnostics: STALL False-Positive Fix
 
-- `STALL` 规则增加 "turn in progress" 豁免条件：turn_count > 0 且 elapsed < 新阈值时不再误报
-- `TURN0_STUCK` 阈值从 120s 保留，STALL 阈值调整后减少长任务误杀
-- 新增 28 个诊断测试用例覆盖 STALL 边界
+- `STALL` rule now includes a "turn in progress" exemption: no false positive when `turn_count > 0` and `elapsed` is below the new threshold
+- `TURN0_STUCK` threshold retained at 120s; adjusted STALL threshold reduces false kills on long-running tasks
+- Added 28 new diagnostic test cases covering STALL boundary conditions
 
-### 文档
+### Documentation
 
-- 新增 `docs/workflow-issues.md`：汇总 worktree 实战中遇到的问题及修复路径，作为后续回归基线
-- 新增 `docs/feature-request-parallel-batch-start.md`：`tcd batch` 并行批量启动命令的 v0.4.0 提案
-- 新增 `docs/example-batch-tasks.json`：batch 命令的示例任务定义
+- Added `docs/workflow-issues.md`: consolidates worktree production issues and fix paths, serving as a regression baseline
+- Added `docs/feature-request-parallel-batch-start.md`: v0.4.0 proposal for `tcd batch` parallel job launch
+- Added `docs/example-batch-tasks.json`: sample task definitions for the batch command
 
-### 测试
+### Tests
 
-- 新增 worktree CLI/SDK 测试 + 诊断测试（total diagnostics +28）
-- 总测试数: 223 → 280+
+- Added worktree CLI/SDK tests + diagnostic tests (total diagnostics +28)
+- Total test count: 223 → 280+
 
 ---
 
 ## v0.3.0 — 2026-03-05
 
-Git worktree 并行隔离、增量输出、活动提取、日志系统。
+Git worktree parallel isolation, incremental output, activity extraction, and logging system.
 
-### Git Worktree 支持
+### Git Worktree Support
 
-- 新增 `src/tcd/worktree.py`：git worktree 原语（create/remove/merge/delete_branch）
-- `tcd start --worktree [--wt-name NAME]`：在独立 worktree 中启动任务
-- `tcd merge <job_id> [--squash] [--no-cleanup]`：合并 worktree 分支回主分支
-- SDK `start()` 新增 `worktree`/`worktree_name` 参数，新增 `merge_worktree()` 方法
-- `kill` 自动清理 worktree
-- Job 模型新增 `worktree_path`/`worktree_branch` 字段
+- Added `src/tcd/worktree.py`: git worktree primitives (create/remove/merge/delete_branch)
+- `tcd start --worktree [--wt-name NAME]`: start a job inside an isolated worktree
+- `tcd merge <job_id> [--squash] [--no-cleanup]`: merge worktree branch back to the main branch
+- SDK `start()` adds `worktree`/`worktree_name` parameters and a new `merge_worktree()` method
+- `kill` automatically cleans up the worktree
+- Job model adds `worktree_path`/`worktree_branch` fields
 
-### 增量输出与活动提取
+### Incremental Output and Activity Extraction
 
-- `tcd output --tail N`：只输出最后 N 行
-- `tcd output --since-line N`：增量轮询（输出第 N 行之后的内容）
-- `tcd check --json` 新增 `activity` 字段：从 scrollback 正则提取有意义的操作行（Edited, Created, Ran 等）
-- 输出行数通过 stderr `__lines_total=N` 暴露，支持外部轮询追踪
+- `tcd output --tail N`: output only the last N lines
+- `tcd output --since-line N`: incremental polling (output lines after line N)
+- `tcd check --json` adds an `activity` field: meaningful action lines extracted from scrollback via regex (Edited, Created, Ran, etc.)
+- Line count exposed via stderr `__lines_total=N` for external poll tracking
 
-### 日志系统
+### Logging System
 
-- `tcd -v`（INFO）/ `tcd -vv`（DEBUG）详细日志，输出到 stderr
-- INFO 级别覆盖所有关键流程：start, check, send, kill, merge, refresh_status
-- WARNING 级别覆盖异常路径：TUI 超时、context_limit、合并冲突、worktree 清理失败、session 消失
+- `tcd -v` (INFO) / `tcd -vv` (DEBUG) verbose logging to stderr
+- INFO level covers all key flows: start, check, send, kill, merge, refresh_status
+- WARNING level covers abnormal paths: TUI timeout, context_limit, merge conflicts, worktree cleanup failure, session disappearance
 
-### 默认 Sandbox 变更
+### Default Sandbox Change
 
-- Codex 默认 sandbox 从 `workspace-write` 改为 `danger-full-access`
-- 诊断规则 R1 只对显式指定 `workspace-write`/`workspace-read` 时警告
+- Codex default sandbox changed from `workspace-write` to `danger-full-access`
+- Diagnostic rule R1 only warns when `workspace-write`/`workspace-read` is explicitly specified
 
-### 测试
+### Tests
 
-- 新增 32 个测试用例（worktree 原语 12 + SDK 集成 12 + CLI 7 + 诊断 1）
-- 总测试数: 191 -> 223
+- Added 32 test cases (worktree primitives 12 + SDK integration 12 + CLI 7 + diagnostics 1)
+- Total test count: 191 → 223
 
 ---
 
 ## v0.2.0 — 2026-03-05
 
-事件日志与诊断系统，全面提升 tcd 的可观测性。详见 `docs/prd-event-log.md`。
+Event log and diagnostics system, significantly improving tcd observability. See `docs/prd-event-log.md` for details.
 
-### Phase 1: 事件日志
+### Phase 1: Event Log
 
-- 新增 `src/tcd/event_log.py`：append-only JSONL 事件日志（emit + load_events）
-- 在 cli.py / sdk.py 关键路径埋入 7 类事件：job.created, job.tui_ready, job.tui_timeout, job.prompt_sent, job.checked, job.turn_complete, job.message_sent, job.killed
-- 新增 `tcd log` 命令：查看事件日志，支持 `--tail N` 和 `--event <type>` 过滤
-- `config.py` 新增 `job_events_path()`，clean 命令同步清理 `.events.jsonl` 文件
+- Added `src/tcd/event_log.py`: append-only JSONL event log (emit + load_events)
+- Instrumented 7 event types at key paths in cli.py / sdk.py: job.created, job.tui_ready, job.tui_timeout, job.prompt_sent, job.checked, job.turn_complete, job.message_sent, job.killed
+- Added `tcd log` command: view event log with `--tail N` and `--event <type>` filtering
+- `config.py` adds `job_events_path()`; clean command now also removes `.events.jsonl` files
 
-### Phase 2: 诊断引擎
+### Phase 2: Diagnostics Engine
 
-- 新增 `src/tcd/diagnostics.py`：4 条规则自动检测问题
-  - SANDBOX_MISMATCH：prompt 含写意图但沙箱模式为 workspace-write
-  - STALL：连续 4 次 check 无状态变化且超过 60s
-  - PERMISSION_ERROR：pane 输出中发现权限拒绝信息
-  - TURN0_STUCK：turn 0 持续 working 超过 120s
-- `tcd check --json`：输出结构化 JSON（state, elapsed_s, turn_count, warnings, pane_tail）
-- SDK 新增 `check_with_diagnostics()` 方法和 `DiagnosticCheckResult` 数据类
+- Added `src/tcd/diagnostics.py`: 4 rules for automatic issue detection
+  - SANDBOX_MISMATCH: prompt contains write intent but sandbox mode is workspace-write
+  - STALL: 4 consecutive checks with no state change and elapsed > 60s
+  - PERMISSION_ERROR: permission denied message found in pane output
+  - TURN0_STUCK: turn 0 remains working for more than 120s
+- `tcd check --json`: outputs structured JSON (state, elapsed_s, turn_count, warnings, pane_tail)
+- SDK adds `check_with_diagnostics()` method and `DiagnosticCheckResult` dataclass
 
-### Phase 3: Skill 更新
+### Phase 3: Skill Update
 
-- `codex-worker` Skill 改用 `tcd check --json` 轮询
-- 新增 4 种 warnings 自动响应策略
-- 文件系统布局补充 `.events.jsonl`，其他命令补充 `tcd log`
+- `codex-worker` Skill updated to poll with `tcd check --json`
+- Added automatic response strategies for 4 warning types
+- Filesystem layout updated to include `.events.jsonl`; other commands updated to include `tcd log`
 
-### Phase 4: Token 记录
+### Phase 4: Token Recording
 
-- `CompletionResult` 新增 `tokens` 字段
-- Codex provider `detect_completion()` 从 NDJSON session 文件解析 token_count
-- `Job` 模型新增 `total_tokens` 字段，每轮累计
-- `tcd status` 和 `tcd status --json` 展示累计 token 用量
-- `job.turn_complete` 事件记录 tokens 数据
+- `CompletionResult` adds a `tokens` field
+- Codex provider `detect_completion()` parses token_count from the NDJSON session file
+- `Job` model adds `total_tokens` field, accumulated per turn
+- `tcd status` and `tcd status --json` display cumulative token usage
+- `job.turn_complete` event records token data
 
-### 测试
+### Tests
 
-- 新增 23 个测试用例（事件日志、诊断规则、token 累计、CLI JSON 输出等）
-- 总测试数: 160 → 183
+- Added 23 test cases (event log, diagnostic rules, token accumulation, CLI JSON output, etc.)
+- Total test count: 160 → 183
 
 ---
 
 ## v0.1.1 — 2026-03-05
 
-Code review 修复轮次，修复 3 个 Critical + 4 个 Major + 2 个 Minor 问题。
+Code review fix round: fixes for 3 Critical + 4 Major + 2 Minor issues.
 
-### Critical 修复
+### Critical Fixes
 
-- **C-2**: Claude/Gemini 多轮会话 turn_count 递增——之前 turn_count 永远为 0 导致 req_id 冲突
-- **C-3**: Provider 启动命令注入防护——model 参数添加正则白名单校验 + shlex.quote 转义
-- **C-1**: Marker 检测从子串匹配改为严格整行匹配，避免前缀误命中
+- **C-2**: Claude/Gemini multi-turn session turn_count increment — previously turn_count was always 0, causing req_id collisions
+- **C-3**: Provider launch command injection protection — model parameter now validated against a regex whitelist + escaped with shlex.quote
+- **C-1**: Marker detection changed from substring match to strict full-line match, preventing prefix false positives
 
-### Major 修复
+### Major Fixes
 
-- **M-1**: Gemini 响应提取不再包含用户 prompt 文本
-- **M-4**: Session 消失时区分 completed（正常）/ failed（异常中断）
-- **M-6**: `--sandbox` 参数从 CLI 贯通到 Codex provider 启动命令（之前是死代码）
+- **M-1**: Gemini response extraction no longer includes the user prompt text
+- **M-4**: Session disappearance now distinguishes completed (normal exit) from failed (abnormal termination)
+- **M-6**: `--sandbox` parameter is now properly threaded from CLI to the Codex provider launch command (was dead code)
 
-### Minor 修复
+### Minor Fixes
 
-- **m-1**: CLI start/send 检查 send_text 返回值，失败时标记 job 为 failed
-- **m-3**: 缩小 except Exception 范围为具体异常类型，添加 logger.exception 日志
+- **m-1**: CLI start/send now checks the send_text return value and marks the job as failed on failure
+- **m-3**: Narrowed broad `except Exception` clauses to specific exception types and added logger.exception logging
 
-### 测试
+### Tests
 
-- 新增 13 个测试用例（model 注入、marker 严格匹配、session 消失状态区分等）
-- 总测试数: 147 → 160
+- Added 13 test cases (model injection, strict marker matching, session disappearance state distinction, etc.)
+- Total test count: 147 → 160
 
 ---
 
 ## v0.1.0 — 2026-03-02
 
-首次发布。Phase 1-4 全部完成，119 单元测试通过，3 个 Provider E2E 验证通过。
+Initial release. Phases 1–4 fully complete, 119 unit tests passing, 3 provider E2E verifications passed.
 
-### Phase 1: 基础框架 + Codex Driver
+### Phase 1: Core Framework + Codex Driver
 
 - tmux Adapter: create/kill session, send_keys, send_long_text (bracketed paste), capture_pane
-- Provider 抽象基类 + 注册表
-- Codex Provider: notify-hook 完成检测, JSONL session 解析
-- Job 管理: JSON 持久化, 状态机 (pending → running → completed/failed)
+- Provider abstract base class + registry
+- Codex Provider: notify-hook completion detection, JSONL session parsing
+- Job management: JSON persistence, state machine (pending → running → completed/failed)
 - Response Collector: session file → capture-pane → log fallback
-- ANSI 输出清理 (CSI/OSC/DCS/ESC 序列移除)
-- CLI 入口: start, send, status, output, check, wait, jobs, attach, kill, clean
+- ANSI output cleanup (CSI/OSC/DCS/ESC sequence removal)
+- CLI entry points: start, send, status, output, check, wait, jobs, attach, kill, clean
 
 ### Phase 2: Claude Code Driver
 
 - Claude Code Provider: `--dangerously-skip-permissions`, `unset CLAUDECODE`
-- Marker 协议: TCD_REQ/TCD_DONE 注入与扫描
-- 空闲检测模块 (20s 阈值)
-- 信任对话自动处理 ("Yes, I trust this folder")
+- Marker protocol: TCD_REQ/TCD_DONE injection and scanning
+- Idle detection module (20s threshold)
+- Trust dialog auto-handling ("Yes, I trust this folder")
 
 ### Phase 3: Gemini CLI Driver
 
-- Gemini CLI Provider: `--yolo` 模式
-- Marker + 空闲检测 (15s 阈值)
-- 信任对话 + 重启等待处理
+- Gemini CLI Provider: `--yolo` mode
+- Marker + idle detection (15s threshold)
+- Trust dialog + restart-wait handling
 
-### Phase 4: Python SDK + 文档
+### Phase 4: Python SDK + Documentation
 
 - Python SDK: `from tcd import TCD` (start/check/wait/output/send/jobs/kill/clean)
-- README.md: CLI 参考, SDK 示例, Provider 支持表, 架构图
+- README.md: CLI reference, SDK examples, provider support table, architecture diagram
 
-### 关键技术决策
+### Key Technical Decisions
 
-- 多行文本使用 `paste-buffer -p` (bracketed paste) 而非 `send-keys -l`，解决 Ink TUI 换行提交问题
-- 三层完成检测: signal file → marker scan → idle detect
-- 平台自适应 `script` 命令 (macOS vs Linux)
+- Multi-line text uses `paste-buffer -p` (bracketed paste) instead of `send-keys -l`, solving the Ink TUI newline-submit problem
+- Three-layer completion detection: signal file → marker scan → idle detect
+- Platform-adaptive `script` command (macOS vs Linux)

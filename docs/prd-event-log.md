@@ -1,44 +1,44 @@
-# PRD: tcd 事件日志与诊断系统
+# PRD: tcd Event Log and Diagnostics System
 
-**版本**: v0.2.0
-**日期**: 2026-03-05
-**状态**: DONE
-**前置**: v0.1.1（Codex code review 修复已合入，160 tests pass）
+**Version**: v0.2.0
+**Date**: 2026-03-05
+**Status**: DONE
+**Prerequisite**: v0.1.1 (Codex code review fixes merged, 160 tests pass)
 
 ---
 
-## 1. 问题
+## 1. Problem
 
-在一次 7 轮 Codex 工作流中（详见 docs/workflow-log.md），暴露了严重的可观测性缺陷：
+A 7-round Codex workflow (see docs/workflow-log.md) exposed serious observability gaps:
 
-| 问题 | 影响 |
+| Problem | Impact |
 |------|------|
-| 所有 killed job 的 error 都是 "killed by user" | 无法区分沙箱失败、自动更新、超时 |
-| token 消耗未记录 | 代码已能解析但未持久化 |
-| model 字段全为 null | Codex 实际用 gpt-5.3-codex，tcd 未捕获 |
-| 7 个 job 之间无关联 | 不知谁是重试、谁依赖谁 |
-| 调用方等 10 分钟无反馈 | `tcd wait` 阻塞，无中间状态 |
-| 问题发现依赖人工 | 沙箱不匹配、stall 等模式需人眼识别 |
+| All killed jobs have error "killed by user" | Cannot distinguish sandbox failure, auto-update, or timeout |
+| Token consumption not recorded | Code can already parse it but never persists |
+| model field is always null | Codex actually used gpt-5.3-codex; tcd never captured it |
+| No association between 7 jobs | Cannot tell which is a retry, which depends on which |
+| Caller waited 10 minutes with no feedback | `tcd wait` blocks; no intermediate state visible |
+| Problem detection requires human eyes | Patterns like sandbox mismatch and stall require manual identification |
 
-**核心洞察**：tcd 记录了机器事实（job.json），调用方记录了叙事日志（workflow-log.md），**中间层完全空白**——没有结构化事件流，没有规则诊断。
-
----
-
-## 2. 设计原则
-
-- **tcd 记录事实，不做决策** — 事件日志 + 规则诊断，不含 LLM
-- **调用方做语义理解和决策** — 通过 Skill 指导行为
-- **追加写入，不修改** — 事件日志是 append-only JSONL
-- **零配置默认开启** — 不需要 `--verbose`，基础事件始终记录
-- **向后兼容** — 不改 job.json 结构，新增 events 文件
+**Core insight**: tcd records machine facts (job.json); callers record narrative logs (workflow-log.md); **the middle layer is completely blank** — no structured event stream, no rule-based diagnostics.
 
 ---
 
-## 3. 方案
+## 2. Design Principles
 
-### 3.1 第一层：事件日志（tcd 自动记录）
+- **tcd records facts, makes no decisions** — event log + rule diagnostics, no LLM
+- **Callers do semantic understanding and decision-making** — guided by Skills
+- **Append-only writes, no modification** — event log is append-only JSONL
+- **Zero-config, enabled by default** — no `--verbose` needed; basic events always recorded
+- **Backward compatible** — job.json structure unchanged; events go in a new file
 
-每个 job 一个 `~/.tcd/jobs/<id>.events.jsonl`，追加写入：
+---
+
+## 3. Design
+
+### 3.1 Layer 1: Event Log (recorded automatically by tcd)
+
+One `~/.tcd/jobs/<id>.events.jsonl` per job, appended to:
 
 ```jsonl
 {"ts":"2026-03-05T04:00:00Z","event":"job.created","provider":"codex","sandbox":"workspace-write","cwd":"/path"}
@@ -50,23 +50,23 @@
 {"ts":"2026-03-05T04:05:00Z","event":"job.killed","reason":"user"}
 ```
 
-**事件类型**：
+**Event types**:
 
-| 事件 | 触发点 | 关键字段 |
+| Event | Trigger | Key Fields |
 |------|--------|---------|
 | `job.created` | `JobManager.create_job()` | provider, sandbox, cwd, model |
-| `job.tui_ready` | `_wait_for_tui()` 完成 | elapsed_ms, trust_handled |
-| `job.tui_timeout` | `_wait_for_tui()` 超时 | elapsed_ms |
-| `job.prompt_sent` | `send_text()` 成功 | bytes, req_id |
-| `job.prompt_failed` | `send_text()` 失败 | error |
-| `job.checked` | `check()` / `wait()` 每次轮询 | state, pane_lines |
-| `job.turn_complete` | 检测到 idle/context_limit | turn, method, tokens |
+| `job.tui_ready` | `_wait_for_tui()` completes | elapsed_ms, trust_handled |
+| `job.tui_timeout` | `_wait_for_tui()` times out | elapsed_ms |
+| `job.prompt_sent` | `send_text()` succeeds | bytes, req_id |
+| `job.prompt_failed` | `send_text()` fails | error |
+| `job.checked` | each poll by `check()` / `wait()` | state, pane_lines |
+| `job.turn_complete` | idle/context_limit detected | turn, method, tokens |
 | `job.message_sent` | `send()` | bytes, req_id, turn |
-| `job.completed` | 正常完成 | elapsed_s |
-| `job.failed` | 异常结束 | error, reason |
-| `job.killed` | 用户 kill | reason |
+| `job.completed` | normal completion | elapsed_s |
+| `job.failed` | abnormal termination | error, reason |
+| `job.killed` | user kill | reason |
 
-**实现方式**：新增 `src/tcd/event_log.py`
+**Implementation**: new `src/tcd/event_log.py`
 
 ```python
 """Append-only event log for job lifecycle tracking."""
@@ -90,21 +90,21 @@ def emit(job_id: str, event: str, **data) -> None:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 ```
 
-**埋点位置**（在现有代码中加 `emit()` 调用）：
+**Instrumentation points** (add `emit()` calls in existing code):
 
-| 文件 | 位置 | 事件 |
+| File | Location | Event |
 |------|------|------|
-| `cli.py:84` | `create_job` 后 | `job.created` |
-| `cli.py:134` | TUI ready 后 | `job.tui_ready` / `job.tui_timeout` |
-| `cli.py:141` | `send_text` 成功/失败 | `job.prompt_sent` / `job.prompt_failed` |
-| `cli.py:240-258` | `check()` 每次调用 | `job.checked` |
-| `cli.py:360` | `send()` 成功 | `job.message_sent` |
+| `cli.py:84` | after `create_job` | `job.created` |
+| `cli.py:134` | after TUI ready | `job.tui_ready` / `job.tui_timeout` |
+| `cli.py:141` | `send_text` success/failure | `job.prompt_sent` / `job.prompt_failed` |
+| `cli.py:240-258` | each `check()` call | `job.checked` |
+| `cli.py:360` | `send()` success | `job.message_sent` |
 | `cli.py:499` | `_kill_job()` | `job.killed` |
-| `sdk.py` | 同上镜像位置 | 同上 |
+| `sdk.py` | mirrored locations | same events |
 
-### 3.2 第二层：诊断引擎（tcd 规则检测）
+### 3.2 Layer 2: Diagnostics Engine (rule-based detection by tcd)
 
-新增 `src/tcd/diagnostics.py`，纯规则引擎，不需要 LLM：
+New `src/tcd/diagnostics.py` — pure rule engine, no LLM required:
 
 ```python
 """Rule-based diagnostics for job health."""
@@ -170,19 +170,19 @@ def diagnose(job: Job, pane_tail: str | None = None) -> list[Warning]:
     return warnings
 ```
 
-### 3.3 CLI 集成
+### 3.3 CLI Integration
 
-**增强 `tcd check`**：
+**Enhanced `tcd check`**:
 
 ```bash
-# 现有行为不变（exit code 0/1/2/3）
+# Existing behavior unchanged (exit codes 0/1/2/3)
 tcd check <job_id>
 
-# 新增 --json 输出（含诊断）
+# New --json output (includes diagnostics)
 tcd check <job_id> --json
 ```
 
-输出：
+Output:
 ```json
 {
   "state": "working",
@@ -196,85 +196,85 @@ tcd check <job_id> --json
 }
 ```
 
-**新增 `tcd log`**：
+**New `tcd log`**:
 
 ```bash
-# 查看事件日志
-tcd log <job_id>                    # 所有事件
-tcd log <job_id> --tail 10          # 最近 10 条
-tcd log <job_id> --event job.checked # 按类型过滤
+# View event log
+tcd log <job_id>                    # all events
+tcd log <job_id> --tail 10          # last 10 events
+tcd log <job_id> --event job.checked # filter by type
 ```
 
-### 3.4 Skill 集成
+### 3.4 Skill Integration
 
-更新 `codex-worker` Skill 的轮询策略：
+Update the `codex-worker` Skill's polling strategy:
 
 ```
-每次轮询用 tcd check <job_id> --json，而非裸 tcd check。
-解析 JSON 中的 warnings：
-- SANDBOX_MISMATCH → 自动 kill + 用 full-auto 重启
-- PERMISSION_ERROR → 告诉用户 Codex 遇到权限问题
-- STALL → 抓 pane_tail 做语义分析，汇报给用户
-- TURN0_STUCK → 可能 TUI 没启动成功，建议 attach 查看
+Each poll uses tcd check <job_id> --json, not bare tcd check.
+Parse warnings from JSON:
+- SANDBOX_MISMATCH → auto kill + restart with full-auto
+- PERMISSION_ERROR → tell user Codex is hitting a permission problem
+- STALL → capture pane_tail for semantic analysis, report to user
+- TURN0_STUCK → TUI may not have started successfully; suggest attach to inspect
 ```
 
 ---
 
-## 4. 实施计划
+## 4. Implementation Plan
 
-### Phase 1: 事件日志（核心）
+### Phase 1: Event Log (core)
 
-- [x] 新增 `src/tcd/event_log.py`（emit + load_events + 路径）
-- [x] 在 `config.py` 加 `job_events_path()`
-- [x] 在 `cli.py` 关键路径埋点（8 个事件）
-- [x] 在 `sdk.py` 镜像埋点
-- [x] `JobManager._remove_job_files()` 清理 events 文件
-- [x] 新增 `tcd log` CLI 命令
-- [x] 测试：事件写入/读取/清理
+- [x] Add `src/tcd/event_log.py` (emit + load_events + path)
+- [x] Add `job_events_path()` to `config.py`
+- [x] Instrument key paths in `cli.py` (8 events)
+- [x] Mirror instrumentation in `sdk.py`
+- [x] `JobManager._remove_job_files()` cleans up events file
+- [x] Add `tcd log` CLI command
+- [x] Tests: event write/read/cleanup
 
-### Phase 2: 诊断引擎
+### Phase 2: Diagnostics Engine
 
-- [x] 新增 `src/tcd/diagnostics.py`（4 条规则）
-- [x] `tcd check --json` 集成诊断输出
-- [x] `tcd check --json` 附加 pane_tail（最后 5 行）
-- [x] 测试：每条规则的触发/不触发
+- [x] Add `src/tcd/diagnostics.py` (4 rules)
+- [x] Integrate diagnostics output into `tcd check --json`
+- [x] Attach pane_tail (last 5 lines) to `tcd check --json`
+- [x] Tests: trigger/no-trigger for each rule
 
-### Phase 3: Skill 更新
+### Phase 3: Skill Update
 
-- [x] 更新 `codex-worker` Skill 使用 `tcd check --json`
-- [x] 添加 warnings 处理策略
-- [x] 实测验证
+- [x] Update `codex-worker` Skill to use `tcd check --json`
+- [x] Add warnings handling strategy
+- [x] Validate in real use
 
-### Phase 4: Token 记录（Codex 特有）
+### Phase 4: Token Recording (Codex-specific)
 
-- [x] `detect_completion()` 中解析 Codex NDJSON 的 token_count
-- [x] 写入 `job.turn_complete` 事件的 tokens 字段
-- [x] 在 `tcd status --json` 中展示累计 token
+- [x] Parse token_count from Codex NDJSON in `detect_completion()`
+- [x] Write to tokens field of `job.turn_complete` event
+- [x] Display cumulative tokens in `tcd status --json`
 
 ---
 
-## 5. 影响范围
+## 5. Impact Scope
 
-| 文件 | 改动类型 |
+| File | Change Type |
 |------|---------|
-| `src/tcd/event_log.py` | **新增** |
-| `src/tcd/diagnostics.py` | **新增** |
-| `src/tcd/config.py` | 加 `job_events_path()` |
-| `src/tcd/cli.py` | 埋点 + `tcd log` + `tcd check --json` |
-| `src/tcd/sdk.py` | 埋点 |
-| `src/tcd/job.py` | `_remove_job_files` 加 events 清理 |
-| `~/.claude/skills/codex-worker/SKILL.md` | 更新轮询策略 |
-| `tests/test_event_log.py` | **新增** |
-| `tests/test_diagnostics.py` | **新增** |
+| `src/tcd/event_log.py` | **New** |
+| `src/tcd/diagnostics.py` | **New** |
+| `src/tcd/config.py` | Add `job_events_path()` |
+| `src/tcd/cli.py` | Instrumentation + `tcd log` + `tcd check --json` |
+| `src/tcd/sdk.py` | Instrumentation |
+| `src/tcd/job.py` | Add events cleanup to `_remove_job_files` |
+| `~/.claude/skills/codex-worker/SKILL.md` | Update polling strategy |
+| `tests/test_event_log.py` | **New** |
+| `tests/test_diagnostics.py` | **New** |
 
-**不改动**：provider 代码、tmux_adapter、collector、output_cleaner
+**Not changed**: provider code, tmux_adapter, collector, output_cleaner
 
 ---
 
-## 6. 非目标
+## 6. Non-Goals
 
-- ❌ 工作流关联（workflow_id）— 留给上层编排系统
-- ❌ LLM 语义分析 — 调用方 Skill 负责
-- ❌ 实时推送/WebSocket — tcd 是 CLI 工具，轮询足够
-- ❌ 日志轮转/压缩 — `tcd clean` 已覆盖生命周期
-- ❌ 修改 job.json 结构 — 事件日志独立存储
+- Workflow association (workflow_id) — left to the upper orchestration system
+- LLM semantic analysis — handled by the caller's Skill
+- Real-time push / WebSocket — tcd is a CLI tool; polling is sufficient
+- Log rotation / compression — `tcd clean` already covers the lifecycle
+- Modifying job.json structure — event log is stored independently

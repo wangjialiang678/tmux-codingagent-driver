@@ -1,25 +1,25 @@
-# 调研报告: claude_code_bridge (bfly123) 源码架构深度分析
+# Research Report: claude_code_bridge (bfly123) — In-Depth Source Architecture Analysis
 
-**日期**: 2026-03-02
-**版本**: v5.2.6
-**仓库**: https://github.com/bfly123/claude_code_bridge
-**任务**: 深度分析 CCB 的 daemon 架构、token 效率机制、跨 AI 协作协议
-
----
-
-## 调研摘要
-
-Claude Code Bridge (CCB) 是一个基于终端分屏的多 AI 协作平台，通过 tmux/WezTerm 驱动 Claude、Codex、Gemini、OpenCode、Droid 在独立窗格中并行运行。其核心创新是"Terminal-as-Bus"架构：不走 API，直接通过终端注入/日志读取实现双向通信，每次调用只发送任务指令（50-200 tokens），AI 的完整上下文保存在各自的 CLI session 中。这是一套成熟的生产级方案（v5.2.6，CHANGELOG 记录了大量边界情况修复）。
+**Date**: 2026-03-02
+**Version**: v5.2.6
+**Repository**: https://github.com/bfly123/claude_code_bridge
+**Objective**: Deep-dive into CCB's daemon architecture, token efficiency mechanism, and cross-AI collaboration protocol
 
 ---
 
-## 一、整体架构概览
+## Research Summary
+
+Claude Code Bridge (CCB) is a multi-AI collaboration platform built on terminal split-panes, driving Claude, Codex, Gemini, OpenCode, and Droid in independent panes via tmux/WezTerm. Its core innovation is a "Terminal-as-Bus" architecture: instead of going through an API, it achieves bidirectional communication through terminal injection and log reading. Each call only sends a task instruction (50–200 tokens); the AI's full context is preserved in its own CLI session. This is a mature, production-grade solution (v5.2.6, with a CHANGELOG documenting numerous edge-case fixes).
+
+---
+
+## 1. Overall Architecture
 
 ```
-用户 / 脚本
+User / Script
     │
     ▼
-bin/ask (统一入口) ─── JSON-RPC over TCP ──► askd daemon (TCP server)
+bin/ask (unified entry) ─── JSON-RPC over TCP ──► askd daemon (TCP server)
                                                     │
                       ┌────────────────────────────┼────────────────────────────┐
                       ▼                            ▼                            ▼
@@ -32,30 +32,30 @@ bin/ask (统一入口) ─── JSON-RPC over TCP ──► askd daemon (TCP se
                (claude session)            (gemini session)            (opencode session)
 ```
 
-### 核心设计哲学
+### Core Design Philosophy
 
-- **不用 API**：所有 AI 都通过 CLI 工具在终端中运行（claude、codex、gemini CLI 等）
-- **终端即总线**：向终端窗格注入文字 = 发送请求；读取 session 日志文件 = 接收响应
-- **会话持久化**：每个 AI 维持自己的独立 session，上下文在 AI 侧保留，不需要每次发全历史
-- **Token 效率**：指令精简（50-200 tokens/call），全历史由 AI session 自维护
+- **No API calls**: All AIs run in the terminal via CLI tools (claude, codex, gemini CLI, etc.)
+- **Terminal as bus**: Injecting text into a terminal pane = sending a request; reading the session log file = receiving a response
+- **Session persistence**: Each AI maintains its own independent session; context is preserved on the AI side, no need to resend the full history each time
+- **Token efficiency**: Instructions are compact (50–200 tokens/call); the AI session self-maintains the full history
 
 ---
 
-## 二、Daemon 架构详解
+## 2. Daemon Architecture
 
-### 2.1 Daemon 层次结构
+### 2.1 Daemon Hierarchy
 
 ```
-askd (统一入口 daemon, bin/askd)
-  └─ 按 provider 分派到各 daemon module:
+askd (unified entry daemon, bin/askd)
+  └─ dispatches by provider to each daemon module:
        ├─ askd.daemon/caskd  - Claude daemon (lask/laskd)
        ├─ askd.daemon/gaskd  - Gemini daemon
        ├─ askd.daemon/oaskd  - OpenCode daemon
        ├─ askd.daemon/daskd  - Droid daemon
-       └─ askd.daemon/laskd  - 通用 Claude daemon (另一套)
+       └─ askd.daemon/laskd  - Generic Claude daemon (alternate implementation)
 ```
 
-注意：providers.py 中注册了 5 个 provider：
+Note: `providers.py` registers 5 providers:
 
 | Provider | Daemon Key | Protocol Prefix | Session File |
 |----------|------------|-----------------|--------------|
@@ -65,25 +65,25 @@ askd (统一入口 daemon, bin/askd)
 | Claude2  | laskd      | lask            | .claude-session |
 | Droid    | daskd      | dask            | .droid-session |
 
-### 2.2 Daemon 生命周期
+### 2.2 Daemon Lifecycle
 
-- **自动启动**：第一个请求到来时，client 检查 daemon 是否运行，未运行则 fork 启动
-- **空闲自停**：60 秒无请求后自动关闭（通过 idle monitor 线程）
-- **父进程监控**：如果启动 daemon 的父进程退出，daemon 自动关闭
-- **状态文件**：daemon 写 `~/.ccb/run/{prefix}d.json`，包含 pid/host/port/token
+- **Auto-start**: When the first request arrives, the client checks whether the daemon is running; if not, it forks and starts it
+- **Idle auto-stop**: Automatically shuts down after 60 seconds with no requests (via idle monitor thread)
+- **Parent process monitoring**: If the process that started the daemon exits, the daemon auto-closes
+- **State file**: The daemon writes `~/.ccb/run/{prefix}d.json` containing pid/host/port/token
 
-### 2.3 TCP Server 实现 (askd_server.py)
+### 2.3 TCP Server Implementation (askd_server.py)
 
 ```python
 class Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
 ```
 
-- 每个连接创建新线程（ThreadingTCPServer 模式）
-- Token 认证（随机生成，写入状态文件）
-- 三类消息：ping / shutdown / request
-- 两个监控守护线程：idle_timeout_monitor + parent_process_monitor
-- 共享状态：`active_requests` 计数器 + `last_activity` 时间戳（通过 activity_lock 保护）
+- Creates a new thread per connection (ThreadingTCPServer pattern)
+- Token authentication (randomly generated, written to state file)
+- Three message types: ping / shutdown / request
+- Two monitoring daemon threads: idle_timeout_monitor + parent_process_monitor
+- Shared state: `active_requests` counter + `last_activity` timestamp (protected by activity_lock)
 
 ### 2.4 Per-Session Worker Pool (worker_pool.py)
 
@@ -91,147 +91,147 @@ class Server(socketserver.ThreadingTCPServer):
 PerSessionWorkerPool
   └─ dict[session_key → BaseSessionWorker]
        └─ BaseSessionWorker (threading.Thread)
-            └─ 内部 queue，串行处理同一 session 的请求
+            └─ internal queue, serializes requests within the same session
 ```
 
-- 每个 session 有独立 worker 线程，保证 session 内请求串行
-- 不同 session 之间并行
-- Worker 死亡时自动重建（health check in pool）
+- Each session has a dedicated worker thread, ensuring requests within a session are serialized
+- Different sessions run in parallel
+- Workers are automatically rebuilt when they die (health check in pool)
 
 ---
 
-## 三、通信协议 (ccb_protocol.py)
+## 3. Communication Protocol (ccb_protocol.py)
 
-### 3.1 请求 ID 格式
+### 3.1 Request ID Format
 
 ```
 CCB_REQ_ID: YYYYMMDD-HHMMSS-mmm-PID-counter
 ```
 
-示例：`CCB_REQ_ID: 20260302-143022-456-12345-001`
+Example: `CCB_REQ_ID: 20260302-143022-456-12345-001`
 
-### 3.2 Prompt 包装机制 (wrap_codex_prompt)
+### 3.2 Prompt Wrapping Mechanism (wrap_codex_prompt)
 
-发送给 AI 的 prompt 被包装为：
+The prompt sent to the AI is wrapped as:
 
 ```
 CCB_REQ_ID: {req_id}
 CCB_BEGIN:
-{实际用户消息，50-200 tokens}
-在回复末尾加上：CCB_DONE:{req_id}
+{actual user message, 50-200 tokens}
+Append at the end of your reply: CCB_DONE:{req_id}
 ```
 
-**这就是 token 效率的关键**：
-- 只发送任务指令（极短）
-- 历史上下文由 AI 的 session 自维护，不随每次请求重发
-- 完成标记让 poller 知道何时停止读取
+**This is the key to token efficiency**:
+- Only the task instruction is sent (extremely short)
+- Conversation history is self-maintained by the AI's session; not resent with each request
+- The completion marker tells the poller when to stop reading
 
-### 3.3 完成检测
+### 3.3 Completion Detection
 
 ```python
 def is_done_text(text: str, req_id: str) -> bool:
-    """从响应末尾向前扫描，找到有效的 CCB_DONE:{req_id} 标记"""
+    """Scan backward from the end of the response to find a valid CCB_DONE:{req_id} marker"""
 ```
 
-- 容忍末尾噪音（空行、其他标记）
-- 从文本末尾向前扫描
-- 过滤掉 harness 可能附加的通用标记
+- Tolerates trailing noise (blank lines, other markers)
+- Scans backward from the end of the text
+- Filters out generic markers that the harness may append
 
-### 3.4 JSON-RPC 协议 (askd_rpc.py)
+### 3.4 JSON-RPC Protocol (askd_rpc.py)
 
-Client → Daemon 通信：
+Client → Daemon communication:
 
 ```json
-请求: {"type": "{prefix}.request", "v": 1, "id": "...", "token": "...",
-       "work_dir": "...", "timeout_s": float, "message": "...", "quiet": bool}
+Request:  {"type": "{prefix}.request", "v": 1, "id": "...", "token": "...",
+           "work_dir": "...", "timeout_s": float, "message": "...", "quiet": bool}
 
-响应: {"type": "{prefix}.response", "reply": "...", "exit_code": int}
+Response: {"type": "{prefix}.response", "reply": "...", "exit_code": int}
 ```
 
-消息格式：newline-delimited JSON over TCP socket
+Message format: newline-delimited JSON over TCP socket
 
 ---
 
-## 四、各 AI 通信层实现
+## 4. Per-AI Communication Layer
 
-### 4.1 统一抽象模式
+### 4.1 Unified Abstraction Pattern
 
-每个 AI 有对应的 `*_comm.py` 文件，实现两个核心类：
+Each AI has a corresponding `*_comm.py` file implementing two core classes:
 
 ```
-XxxLogReader      - 读取 AI session 日志文件
-XxxCommunicator   - 双向通信（注入 + 读取）
-    ├── ask_async()  - 异步发送，不等响应
-    └── ask_sync()   - 同步发送，等待 CCB_DONE 标记
+XxxLogReader      - Reads the AI session log file
+XxxCommunicator   - Bidirectional communication (inject + read)
+    ├── ask_async()  - Async send, no wait for response
+    └── ask_sync()   - Sync send, waits for CCB_DONE marker
 ```
 
-### 4.2 Claude 通信 (claude_comm.py)
+### 4.2 Claude Communication (claude_comm.py)
 
-- **日志位置**：`~/.claude/projects/<key>/` 目录下的 session 文件
-- **会话发现**：多种策略（环境变量 → 文件系统扫描 → index 查找）
-- **消息注入**：通过 tmux `send-keys` 或 WezTerm 文字注入
-- **响应读取**：解析 Claude 的 JSONL session 日志，提取 response items，过滤 thinking blocks
-- **Subagent 支持**：可跟踪 Claude 的子代理日志
+- **Log location**: Session files under `~/.claude/projects/<key>/`
+- **Session discovery**: Multiple strategies (env var → filesystem scan → index lookup)
+- **Message injection**: Via tmux `send-keys` or WezTerm text injection
+- **Response reading**: Parses Claude's JSONL session log, extracts response items, filters thinking blocks
+- **Subagent support**: Can track Claude's sub-agent logs
 
-### 4.3 Codex 通信 (codex_comm.py)
+### 4.3 Codex Communication (codex_comm.py)
 
-- **日志位置**：`~/.codex/sessions/`
-- **双传输模式**：
-  - tmux 模式：通过 FIFO 管道发送（更可靠）
-  - WezTerm 模式：直接文字注入到终端
-- **逆向行迭代**：从日志末尾往前读，避免重读全文
-- **健康检查**：验证 codex 进程和终端窗格是否还活着
+- **Log location**: `~/.codex/sessions/`
+- **Dual transport mode**:
+  - tmux mode: sent via FIFO pipe (more reliable)
+  - WezTerm mode: direct text injection into terminal
+- **Reverse line iteration**: Reads from the end of the log, avoids re-reading the full file
+- **Health check**: Verifies whether the codex process and terminal pane are still alive
 
-### 4.4 Gemini 通信 (gemini_comm.py)
+### 4.4 Gemini Communication (gemini_comm.py)
 
-特殊挑战：
-- Gemini 0.29 引入了 **dual hash strategy** 用于 session 发现（两种哈希算法兼容）
-- 有时不输出完成标记 → 15 秒空闲检测兜底
-- `--autostart` flag 用于离线 daemon 自动启动
+Special challenges:
+- Gemini 0.29 introduced a **dual hash strategy** for session discovery (compatible with two hash algorithms)
+- Sometimes does not output a completion marker → 15-second idle detection fallback
+- `--autostart` flag for offline daemon auto-start
 
-### 4.5 OpenCode 通信 (opencode_comm.py)
+### 4.5 OpenCode Communication (opencode_comm.py)
 
-- **存储格式**：JSON 文件 + SQLite 双源（灵活迁移）
-- **路径**：`storage/session/<projectID>/ses_*.json`、`../opencode.db`
-- **取消检测**：监控 `MessageAbortedError` + 日志 tail（双重机制）
-- **session 过滤**：通过 `session_id_filter` 路由到特定会话
+- **Storage format**: JSON files + SQLite dual-source (flexible migration)
+- **Paths**: `storage/session/<projectID>/ses_*.json`, `../opencode.db`
+- **Cancellation detection**: Monitors `MessageAbortedError` + log tail (dual mechanism)
+- **Session filtering**: Routes to specific sessions via `session_id_filter`
 
 ---
 
-## 五、Token 效率机制（50-200 tokens/call 的实现原理）
+## 5. Token Efficiency Mechanism (How 50–200 Tokens/Call Is Achieved)
 
-### 5.1 为什么这么低？
+### 5.1 Why So Low?
 
-传统 API 调用每次需要发送：system prompt + 完整对话历史 + 新消息 = 数千 tokens
+A traditional API call must send: system prompt + full conversation history + new message = thousands of tokens
 
-CCB 的做法：
-1. **AI CLI 维持 session**：claude/codex/gemini CLI 自己管理对话历史
-2. **只发新消息**：`CCB_REQ_ID: ... \n CCB_BEGIN: \n {新指令} \n 回复末尾加 CCB_DONE:...`
-3. **终端注入不经 API**：直接模拟键盘输入，相当于手动打字
-4. **无 overhead**：没有 API envelope、headers、system prompt 重复
+CCB's approach:
+1. **AI CLI maintains session**: claude/codex/gemini CLI manages conversation history itself
+2. **Only send the new message**: `CCB_REQ_ID: ... \n CCB_BEGIN: \n {new instruction} \n Append CCB_DONE:... at end of reply`
+3. **Terminal injection bypasses the API**: Simulates keyboard input directly, equivalent to typing manually
+4. **No overhead**: No API envelope, headers, or repeated system prompt
 
 ### 5.2 Context Transfer (memory/transfer.py)
 
-当需要跨 session 传递上下文时：
-- `ContextTransfer` 类实现 8000 token 预算管理
-- 去重：`ConversationDeduper` 移除重复 message pairs
-- 截断：`last_n` 参数只保留最近 N 轮
-- Pipeline：parse → dedupe → collapse tool calls → build pairs → truncate → estimate tokens → format → send
-- 持久化：`./.ccb/history/` 目录保存传输记录
+When context needs to be passed across sessions:
+- `ContextTransfer` class implements an 8000-token budget manager
+- Deduplication: `ConversationDeduper` removes duplicate message pairs
+- Truncation: `last_n` parameter retains only the last N turns
+- Pipeline: parse → dedupe → collapse tool calls → build pairs → truncate → estimate tokens → format → send
+- Persistence: transfer records saved to `./.ccb/history/`
 
-### 5.3 Memory-First 架构 (docs/memory-first-agent-architecture.md)
+### 5.3 Memory-First Architecture (docs/memory-first-agent-architecture.md)
 
-文档定义了高级设计哲学：
-- **Role A (Memory Keeper)**：跨 session 维护持久知识
-- **Role B (Context Builder)**：组装短期 context 给执行者
-- **Role C (Executor)**：无状态执行，接受预组装 context
-- **Role T (Task Tracker)**：防止多窗口任务的 context 膨胀
-- **三级存储**：L1 热(Redis) / L2 温(SQLite) / L3 冷(ChromaDB)
-- **核心原则**："不让模型记忆，让模型查询"
+Document defines the high-level design philosophy:
+- **Role A (Memory Keeper)**: Maintains persistent knowledge across sessions
+- **Role B (Context Builder)**: Assembles short-term context for executors
+- **Role C (Executor)**: Stateless execution, receives pre-assembled context
+- **Role T (Task Tracker)**: Prevents context bloat from multi-window tasks
+- **Three-tier storage**: L1 hot (Redis) / L2 warm (SQLite) / L3 cold (ChromaDB)
+- **Core principle**: "Don't let the model remember — let the model query"
 
 ---
 
-## 六、Session 管理系统
+## 6. Session Management System
 
 ### 6.1 Session Registry (pane_registry.py)
 
@@ -239,36 +239,36 @@ CCB 的做法：
 ~/.ccb/run/ccb-session-{id}.json
 ```
 
-- TTL：7 天
-- JSON 原子写入
-- 支持 legacy flat keys 和新版嵌套 `providers` 结构（自动迁移）
-- 字段：terminal backend、pane ID、provider session paths、work dir、project ID
+- TTL: 7 days
+- Atomic JSON writes
+- Supports legacy flat keys and new nested `providers` structure (auto-migration)
+- Fields: terminal backend, pane ID, provider session paths, work dir, project ID
 
-### 6.2 多层查找策略
+### 6.2 Multi-Level Lookup Strategy
 
-1. Session ID 直接查找
-2. Claude pane identifier 匹配
-3. Project ID + provider 组合（强制目录隔离）
+1. Direct lookup by session ID
+2. Match by Claude pane identifier
+3. Combination of project ID + provider (enforces directory isolation)
 
-### 6.3 Pane 恢复机制 (gaskd_session.py, laskd_session.py)
+### 6.3 Pane Recovery Mechanism (gaskd_session.py, laskd_session.py)
 
 ```
 ensure_pane():
-  1. backend.is_alive(pane_id) → 存活则直接用
-  2. 通过 title marker 搜索 pane
-  3. tmux respawn_pane() 重生 pane
-  4. 重生前保存 crash log
+  1. backend.is_alive(pane_id) → if alive, use directly
+  2. Search pane by title marker
+  3. tmux respawn_pane() to respawn the pane
+  4. Save crash log before respawning
 ```
 
-- 支持 tmux 自动 respawn
-- Pane title marker 作为 fallback 标识
-- Session 切换时触发 `maybe_auto_transfer()` 上下文迁移
+- Supports tmux auto-respawn
+- Pane title marker serves as fallback identifier
+- `maybe_auto_transfer()` context migration triggered on session switch
 
 ---
 
-## 七、WezTerm/tmux 集成层 (terminal.py)
+## 7. WezTerm/tmux Integration Layer (terminal.py)
 
-### 7.1 Backend 抽象
+### 7.1 Backend Abstraction
 
 ```python
 class TerminalBackend:
@@ -280,154 +280,154 @@ class TerminalBackend:
     def get_pane_title(pane_id)
 ```
 
-### 7.2 自动检测
+### 7.2 Auto-Detection
 
-- Linux/macOS/WSL：使用 tmux
-- Windows：使用 WezTerm + PowerShell
-- 通过环境变量覆盖
+- Linux/macOS/WSL: uses tmux
+- Windows: uses WezTerm + PowerShell
+- Can be overridden via environment variable
 
-### 7.3 WezTerm 差异
+### 7.3 WezTerm Differences
 
-- WezTerm 不支持 FIFO，改用直接文字注入
-- PowerShell wrapper 处理 Windows 命令行长度限制（通过 stdin piping）
-- `.cmd` / `.bat` 后缀的 wrapper 文件会被过滤（completion hook 需要 Python 直接执行）
+- WezTerm does not support FIFO; uses direct text injection instead
+- PowerShell wrapper handles Windows command-line length limits (via stdin piping)
+- Wrapper files with `.cmd` / `.bat` suffix are filtered out (completion hook requires Python direct execution)
 
 ---
 
-## 八、跨 AI 任务委派机制
+## 8. Cross-AI Task Delegation Mechanism
 
-### 8.1 Claude 作为 Orchestrator
+### 8.1 Claude as Orchestrator
 
-`bin/ask` 脚本向所有 provider 提供统一接口：
+The `bin/ask` script provides a unified interface to all providers:
 
 ```bash
-ask codex "实现 X 功能"      # Claude 指挥 Codex
-ask gemini "审查这段代码"    # Claude 指挥 Gemini
-ask opencode "..."           # Claude 指挥 OpenCode
+ask codex "implement feature X"     # Claude instructs Codex
+ask gemini "review this code"       # Claude instructs Gemini
+ask opencode "..."                  # Claude instructs OpenCode
 ```
 
-Claude 的 SKILL.md 中定义了如何使用 `ask` 命令委派任务给其他 AI。
+Claude's SKILL.md defines how to use the `ask` command to delegate tasks to other AIs.
 
-### 8.2 Codex → OpenCode 委派
+### 8.2 Codex → OpenCode Delegation
 
-通过 `codex_dual_bridge.py` 实现：
-- DualBridge 读取来自 Claude 的 FIFO 输入（JSON payload）
-- 转发命令到 Codex 终端
-- 本质是单向命令注入桥，不是真正的 peer-to-peer
+Implemented via `codex_dual_bridge.py`:
+- DualBridge reads FIFO input from Claude (JSON payload)
+- Forwards commands to the Codex terminal
+- Essentially a one-way command injection bridge, not true peer-to-peer
 
-### 8.3 异步防循环机制 (format_guardrails.py)
+### 8.3 Async Anti-Loop Mechanism (format_guardrails.py)
 
-关键设计：Claude 提交 `ask` 之后**禁止 polling**
+Key design: after Claude submits an `ask`, **polling is prohibited**
 
 ```
-claude-md-ccb.md 中的强制规则：
+Hard rule in claude-md-ccb.md:
 "END YOUR TURN NOW. Reply ONLY '[Provider] processing...', then stop."
 ```
 
-- 通过 CLAUDE.md skill 规则在 prompt 层面硬约束
-- 防止 Claude 在 async 提交后继续 polling → 死锁/循环
-- v5.2.5 专门修复了这个问题
+- Enforced at the prompt level via CLAUDE.md skill rules
+- Prevents Claude from continuing to poll after an async submission → deadlock/loop
+- v5.2.5 specifically fixed this problem
 
 ### 8.4 Completion Hook (completion_hook.py)
 
-异步任务完成通知系统：
-- 在后台线程中执行（不阻塞 daemon）
-- 通过 `ccb-completion-hook` 脚本通知调用方
-- 支持 email 集成（SMTP，3次重试，最大 8s backoff）
-- 超时：60 秒
+Async task completion notification system:
+- Executes in a background thread (does not block the daemon)
+- Notifies the caller via the `ccb-completion-hook` script
+- Supports email integration (SMTP, 3 retries, max 8s backoff)
+- Timeout: 60 seconds
 
 ---
 
-## 九、目录结构关键文件索引
+## 9. Directory Structure Key File Index
 
 ```
 claude_code_bridge/
 ├── bin/
-│   ├── ask              - 统一任务分派入口（所有 provider）
-│   ├── askd             - daemon 管理器
-│   ├── cask/gask/oask   - 各 provider 专用客户端
-│   ├── cpend/gpend      - 查询 pending 响应
-│   ├── cping/gping      - 连通性检测
-│   ├── ccb-completion-hook - 异步完成通知
-│   └── ctx-transfer     - 手动跨 AI context 迁移
+│   ├── ask              - unified task dispatch entry (all providers)
+│   ├── askd             - daemon manager
+│   ├── cask/gask/oask   - provider-specific clients
+│   ├── cpend/gpend      - query pending responses
+│   ├── cping/gping      - connectivity check
+│   ├── ccb-completion-hook - async completion notification
+│   └── ctx-transfer     - manual cross-AI context migration
 ├── lib/
-│   ├── ccb_protocol.py    - 核心协议（REQ_ID, BEGIN, DONE 标记）
+│   ├── ccb_protocol.py    - core protocol (REQ_ID, BEGIN, DONE markers)
 │   ├── askd_server.py     - TCP daemon server
 │   ├── askd_client.py     - daemon client + RPC
 │   ├── askd_rpc.py        - JSON-RPC over TCP
-│   ├── askd_runtime.py    - daemon 路径/日志工具
+│   ├── askd_runtime.py    - daemon path/log utilities
 │   ├── worker_pool.py     - per-session worker pool
-│   ├── providers.py       - 5 个 provider 注册表
-│   ├── terminal.py        - tmux/WezTerm 抽象层
-│   ├── pane_registry.py   - session 注册表（JSON 持久化）
-│   ├── completion_hook.py - 异步完成回调
-│   ├── claude_comm.py     - Claude 通信层
-│   ├── codex_comm.py      - Codex 通信层
-│   ├── gemini_comm.py     - Gemini 通信层
-│   ├── opencode_comm.py   - OpenCode 通信层
-│   ├── droid_comm.py      - Droid 通信层
-│   ├── codex_dual_bridge.py - Claude→Codex 命令桥
-│   ├── format_guardrails.py - 代码格式守卫
-│   ├── ctx_transfer_utils.py - context 迁移工具
-│   ├── laskd_session.py   - Claude session 管理
-│   ├── gaskd_session.py   - Gemini session 管理
-│   ├── oaskd_session.py   - OpenCode session 管理
+│   ├── providers.py       - 5-provider registry
+│   ├── terminal.py        - tmux/WezTerm abstraction layer
+│   ├── pane_registry.py   - session registry (JSON persistence)
+│   ├── completion_hook.py - async completion callback
+│   ├── claude_comm.py     - Claude communication layer
+│   ├── codex_comm.py      - Codex communication layer
+│   ├── gemini_comm.py     - Gemini communication layer
+│   ├── opencode_comm.py   - OpenCode communication layer
+│   ├── droid_comm.py      - Droid communication layer
+│   ├── codex_dual_bridge.py - Claude→Codex command bridge
+│   ├── format_guardrails.py - code format guardrails
+│   ├── ctx_transfer_utils.py - context migration utilities
+│   ├── laskd_session.py   - Claude session management
+│   ├── gaskd_session.py   - Gemini session management
+│   ├── oaskd_session.py   - OpenCode session management
 │   └── memory/
-│       ├── transfer.py    - context transfer（8K token 预算）
-│       ├── deduper.py     - 对话去重
-│       ├── formatter.py   - context 格式化
-│       └── session_parser.py - session 日志解析
+│       ├── transfer.py    - context transfer (8K token budget)
+│       ├── deduper.py     - conversation deduplication
+│       ├── formatter.py   - context formatting
+│       └── session_parser.py - session log parser
 └── docs/
-    └── memory-first-agent-architecture.md - 高级架构设计文档
+    └── memory-first-agent-architecture.md - high-level architecture design doc
 ```
 
 ---
 
-## 十、与 Elvis Codex + ClaudeCode 项目的关联性
+## 10. Relevance to the Elvis Codex + ClaudeCode Project
 
-### 10.1 可直接借鉴的设计
+### 10.1 Designs Worth Directly Reusing
 
-| CCB 技术 | Elvis 可复用方式 |
-|----------|----------------|
-| `ccb_protocol.py` REQ_ID + CCB_DONE 标记 | 实现 Claude subagent 完成检测 |
-| `worker_pool.py` per-session 串行化 | 防止同一 session 并发污染 |
-| `askd_server.py` TCP daemon + idle timeout | 参考 daemon 生命周期管理 |
-| Session registry JSON 结构 | 多 AI session 状态持久化 |
-| completion_hook.py 异步通知模式 | 异步任务完成回调设计 |
-| async guardrail（禁止 polling）模式 | 防止 orchestrator AI 死循环 |
+| CCB Technique | How Elvis Can Reuse It |
+|--------------|----------------------|
+| `ccb_protocol.py` REQ_ID + CCB_DONE marker | Implement Claude subagent completion detection |
+| `worker_pool.py` per-session serialization | Prevent concurrent contamination within the same session |
+| `askd_server.py` TCP daemon + idle timeout | Reference for daemon lifecycle management |
+| Session registry JSON structure | Multi-AI session state persistence |
+| `completion_hook.py` async notification pattern | Async task completion callback design |
+| Async guardrail (prohibit polling) pattern | Prevent orchestrator AI loops |
 
-### 10.2 不适合直接复用的部分
+### 10.2 Parts Not Suitable for Direct Reuse
 
-| CCB 技术 | 原因 |
-|----------|------|
-| 整体 tmux/WezTerm 注入架构 | Elvis 走 nanobot SDK，不是终端注入 |
-| 完整 daemon 套件 | 依赖太深，不适合嵌入 nanobot |
-| Memory-First 三层存储 | 过于复杂，超出 MVP 范围 |
+| CCB Technique | Reason |
+|--------------|--------|
+| Full tmux/WezTerm injection architecture | Elvis uses nanobot SDK, not terminal injection |
+| Complete daemon suite | Too heavyweight; not suitable for embedding in nanobot |
+| Memory-First three-tier storage | Too complex, out of MVP scope |
 
-### 10.3 关键启发
+### 10.3 Key Insights
 
-1. **Token 效率来自 session 持久化**：让 AI 维持自己的 session，每次只发新指令
-2. **完成检测是核心挑战**：每个 AI 的完成信号不同（CCB 花了大量版本迭代解决此问题）
-3. **Async guardrail 是必须的**：不在 prompt 层面约束 orchestrator，必然出现循环
-4. **跨平台通信多态**：同一接口在 tmux/WezTerm/FIFO 下有不同实现
-
----
-
-## 十一、总结
-
-CCB 是目前最成熟的开源多 AI 协作终端方案（v5.2.6，活跃维护）。其核心创新：
-
-1. **不走 API**，通过终端注入+日志读取实现双向通信
-2. **Token 效率来源**是让各 AI CLI 自维护 session，不重发历史
-3. **CCB_DONE 标记协议**是统一完成检测的关键
-4. **Per-session worker pool** 防止并发污染
-5. **Async guardrail** 在 CLAUDE.md/prompt 层面防止 orchestrator 循环
-
-对 Elvis 项目最有价值的是：session 管理模式、完成检测协议设计、以及 async guardrail 防循环机制。
+1. **Token efficiency comes from session persistence**: Let the AI maintain its own session; only send new instructions each time
+2. **Completion detection is the core challenge**: Each AI has a different completion signal (CCB spent many versions iterating to solve this)
+3. **Async guardrails are mandatory**: Without constraining the orchestrator at the prompt level, loops are inevitable
+4. **Cross-platform communication polymorphism**: The same interface has different implementations under tmux/WezTerm/FIFO
 
 ---
 
-## 参考资料
+## 11. Summary
+
+CCB is currently the most mature open-source multi-AI collaboration terminal solution (v5.2.6, actively maintained). Its core innovations:
+
+1. **No API calls** — bidirectional communication via terminal injection + log reading
+2. **Token efficiency** — each AI CLI self-maintains its session; history is not resent
+3. **CCB_DONE marker protocol** — the key to unified completion detection
+4. **Per-session worker pool** — prevents concurrent contamination
+5. **Async guardrail** — prevents orchestrator loops at the CLAUDE.md/prompt level
+
+Most valuable to the Elvis project: session management patterns, completion detection protocol design, and the async guardrail anti-loop mechanism.
+
+---
+
+## References
 
 - [bfly123/claude_code_bridge GitHub](https://github.com/bfly123/claude_code_bridge)
 - [ccb_protocol.py](https://raw.githubusercontent.com/bfly123/claude_code_bridge/main/lib/ccb_protocol.py)

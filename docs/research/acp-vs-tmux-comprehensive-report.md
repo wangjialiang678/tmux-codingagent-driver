@@ -1,87 +1,85 @@
-# ACP (Agent Client Protocol) 深度调研报告
+# ACP (Agent Client Protocol) Deep Research Report
 
-**项目**: tmux-codingagent-driver (tcd)
-**日期**: 2026-03-05
-**作者**: Michael (AI-assisted research)
-**状态**: 完成
-
----
-
-## 摘要
-
-本报告对 Agent Client Protocol (ACP) 进行全面技术调研，涵盖协议原理、生态现状、已知问题，并与本项目（tcd）的 tmux 方案进行系统对比。核心结论：**ACP 在协议设计上代表了 AI coding agent 通信的未来方向，但当前实现（特别是 acpx）仍处于 alpha 阶段，存在多个严重已知问题；tmux 方案在进程稳定性、通用性和可调试性上具有明确优势，是当下更实用的选择。**
+**Project**: tmux-codingagent-driver (tcd)
+**Date**: 2026-03-05
+**Author**: Michael (AI-assisted research)
+**Status**: Complete
 
 ---
 
-## 目录
+## Summary
 
-1. [ACP 协议概述](#一acp-协议概述)
-2. [ACP 技术原理详解](#二acp-技术原理详解)
-3. [OpenClaw 与 acpx 架构](#三openclaw-与-acpx-架构)
-4. [ACP 生态：支持的工具与平台](#四acp-生态支持的工具与平台)
-5. [ACP 进程生命周期与已知问题](#五acp-进程生命周期与已知问题)
-6. [Claude Code 与 ACP 的关系](#六claude-code-与-acp-的关系)
-7. [OpenClaw ACP 配置与部署](#七openclaw-acp-配置与部署)
-8. [ACP vs tmux 方案：系统对比](#八acp-vs-tmux-方案系统对比)
-9. [用户体验维度分析](#九用户体验维度分析)
-10. [tcd 项目的演进建议](#十tcd-项目的演进建议)
-11. [参考资料](#十一参考资料)
+This report provides a comprehensive technical investigation of Agent Client Protocol (ACP), covering protocol principles, ecosystem status, known issues, and a systematic comparison with this project's (tcd) tmux approach. Core conclusion: **ACP represents the future direction of AI coding agent communication in protocol design, but the current implementation (particularly acpx) is still in alpha stage with several serious known issues; the tmux approach has clear advantages in process stability, generality, and debuggability, making it the more practical choice today.**
 
 ---
 
-## 一、ACP 协议概述
+## Table of Contents
 
-### 1.1 什么是 ACP
+1. [ACP Protocol Overview](#i-acp-protocol-overview)
+2. [ACP Technical Internals](#ii-acp-technical-internals)
+3. [OpenClaw and acpx Architecture](#iii-openclaw-and-acpx-architecture)
+4. [ACP Ecosystem: Supported Tools and Platforms](#iv-acp-ecosystem-supported-tools-and-platforms)
+5. [ACP Process Lifecycle and Known Issues](#v-acp-process-lifecycle-and-known-issues)
+6. [Claude Code and ACP Relationship](#vi-claude-code-and-acp-relationship)
+7. [OpenClaw ACP Configuration and Deployment](#vii-openclaw-acp-configuration-and-deployment)
+8. [ACP vs tmux Approach: System Comparison](#viii-acp-vs-tmux-approach-system-comparison)
+9. [User Experience Dimension Analysis](#ix-user-experience-dimension-analysis)
+10. [tcd Project Evolution Recommendations](#x-tcd-project-evolution-recommendations)
+11. [References](#xi-references)
 
-Agent Client Protocol (ACP) 是一个基于 **JSON-RPC 2.0** 的开放标准协议，用于统一代码编辑器/IDE 与 AI coding agent 之间的结构化双向通信。它由 **Zed Industries** 于 2025 年 8 月发布（Apache License 2.0），定位为 AI agent 领域的 **LSP（Language Server Protocol）**。
+---
 
-### 1.2 诞生背景
+## I. ACP Protocol Overview
 
-Zed 官方在 PromptLayer 博客中的原话精准描述了 ACP 的诞生动因：
+### 1.1 What Is ACP
+
+Agent Client Protocol (ACP) is an open standard protocol based on **JSON-RPC 2.0** for structured bidirectional communication between code editors/IDEs and AI coding agents. It was published by **Zed Industries** in August 2025 (Apache License 2.0), positioned as the **LSP (Language Server Protocol)** for the AI agent domain.
+
+### 1.2 Origin
+
+Zed officially described ACP's motivation precisely in a PromptLayer blog post:
 
 > "We were already running Gemini CLI inside our embedded terminal... but we needed a more structured way of communicating than ANSI escape codes."
->
-> ——"我们已经在嵌入式终端中运行 Gemini CLI 了，但我们需要一种比 ANSI 转义码更结构化的通信方式。"
 
-在 ACP 之前，IDE 与 AI agent 的通信主要依赖两种方式：
+Before ACP, IDE-to-AI-agent communication relied primarily on two approaches:
 
-| 方式 | 问题 |
-|------|------|
-| **终端嵌入（PTY/tmux）** | ANSI 转义码解析脆弱，状态感知困难，输出不结构化 |
-| **API 直连** | 每次调用需重发完整上下文，token 浪费严重，不能利用 CLI 的本地工具能力 |
+| Approach | Problems |
+|----------|---------|
+| **Terminal embedding (PTY/tmux)** | ANSI escape code parsing is fragile, state awareness is difficult, output is unstructured |
+| **Direct API** | Full context must be resent every call, severe token waste; cannot leverage CLI's local tool capabilities |
 
-ACP 的目标是提供第三种方式：**结构化的进程间通信协议**，让 IDE 和 agent 像 LSP 中的编辑器和语言服务器一样协作。
+ACP's goal is to provide a third approach: **a structured inter-process communication protocol**, letting IDEs and agents collaborate like editors and language servers do in LSP.
 
-### 1.3 核心设计理念
+### 1.3 Core Design Philosophy
 
-| 理念 | 说明 |
-|------|------|
-| **语义级通信** | 用 JSON 消息传递意图，而非原始字符流 |
-| **双向请求** | Agent 可以主动向客户端请求文件操作、终端创建等 |
-| **能力协商** | 连接时双方声明各自能力，协议自适应 |
-| **会话持久化** | 会话跨进程存活，支持恢复和分叉 |
-| **权限门控** | 客户端可以拦截和审批 agent 的操作请求 |
+| Philosophy | Description |
+|-----------|-------------|
+| **Semantic communication** | Convey intent via JSON messages rather than raw character streams |
+| **Bidirectional requests** | Agent can proactively request file operations, terminal creation, etc. from the client |
+| **Capability negotiation** | Both sides declare their capabilities at connection time; protocol adapts |
+| **Session persistence** | Sessions survive across processes, supporting resumption and forking |
+| **Permission gating** | Client can intercept and approve agent operation requests |
 
 ---
 
-## 二、ACP 技术原理详解
+## II. ACP Technical Internals
 
-### 2.1 传输层
+### 2.1 Transport Layer
 
-ACP 支持两种传输方式：
+ACP supports two transport modes:
 
-| 方式 | 适用场景 | 技术细节 |
-|------|---------|---------|
-| **stdio pipe** | 本地 Agent | 编辑器 spawn agent 子进程，通过 stdin/stdout 管道通信 |
-| **HTTP/WebSocket** | 远程 Agent | 通过网络连接远程 agent 服务 |
+| Mode | Use Case | Technical Details |
+|------|----------|------------------|
+| **stdio pipe** | Local Agent | Editor spawns agent as child process, communicates via stdin/stdout pipe |
+| **HTTP/WebSocket** | Remote Agent | Connects to remote agent service over network |
 
-消息编码采用 **NDJSON（Newline-Delimited JSON）**——每条消息占一行，以换行符分隔。
+Message encoding uses **NDJSON (Newline-Delimited JSON)** — each message occupies one line, separated by newlines.
 
-### 2.2 协议基础：JSON-RPC 2.0
+### 2.2 Protocol Foundation: JSON-RPC 2.0
 
-所有 ACP 消息遵循 JSON-RPC 2.0 规范，分三种类型：
+All ACP messages follow the JSON-RPC 2.0 specification in three types:
 
-**Request（请求）**——需要对方响应：
+**Request** — requires a response from the other party:
 ```json
 {
   "jsonrpc": "2.0",
@@ -96,7 +94,7 @@ ACP 支持两种传输方式：
 }
 ```
 
-**Response（响应）**——回复 Request：
+**Response** — replies to a Request:
 ```json
 {
   "jsonrpc": "2.0",
@@ -109,7 +107,7 @@ ACP 支持两种传输方式：
 }
 ```
 
-**Notification（通知）**——单向消息，无需响应（用于流式更新）：
+**Notification** — one-way message, no response needed (used for streaming updates):
 ```json
 {
   "jsonrpc": "2.0",
@@ -122,35 +120,35 @@ ACP 支持两种传输方式：
 }
 ```
 
-### 2.3 连接生命周期（三阶段）
+### 2.3 Connection Lifecycle (Three Phases)
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    ACP 连接生命周期                            │
+│                    ACP Connection Lifecycle                    │
 │                                                              │
-│  阶段 1: 初始化 (Initialize)                                 │
+│  Phase 1: Initialize                                         │
 │  ┌─────────┐                          ┌─────────┐           │
 │  │ Client  │ ── initialize ────────→  │  Agent  │           │
 │  │         │ ←─ InitializeResult ───  │         │           │
-│  └─────────┘    (能力协商+版本)        └─────────┘           │
+│  └─────────┘    (capability negotiation + version)           │
 │                                                              │
-│  阶段 2: 认证 (可选)                                         │
+│  Phase 2: Authenticate (optional)                            │
 │  ┌─────────┐                          ┌─────────┐           │
 │  │ Client  │ ── authenticate ──────→  │  Agent  │           │
 │  │         │ ←─ AuthResult ─────────  │         │           │
 │  └─────────┘                          └─────────┘           │
 │                                                              │
-│  阶段 3: 就绪 (Ready)                                        │
+│  Phase 3: Ready                                              │
 │  ┌─────────┐                          ┌─────────┐           │
 │  │ Client  │ ←── ready ────────────── │  Agent  │           │
-│  │         │     可以创建会话了         │         │           │
+│  │         │     can now create sessions           │         │
 │  └─────────┘                          └─────────┘           │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-**初始化阶段的能力声明示例：**
+**Capability declaration example during initialization:**
 
-客户端声明自己支持的能力：
+Client declares supported capabilities:
 ```json
 {
   "capabilities": {
@@ -162,7 +160,7 @@ ACP 支持两种传输方式：
 }
 ```
 
-Agent 回应自身能力：
+Agent responds with its own capabilities:
 ```json
 {
   "capabilities": {
@@ -173,80 +171,80 @@ Agent 回应自身能力：
 }
 ```
 
-### 2.4 会话生命周期
+### 2.4 Session Lifecycle
 
 ```
 Client                              Agent
   │                                   │
-  │─── session/new ─────────────────→ │  创建会话
-  │←── response { sessionId } ──────  │  返回 sessionId
+  │─── session/new ─────────────────→ │  create session
+  │←── response { sessionId } ──────  │  return sessionId
   │                                   │
-  │─── session/prompt ──────────────→ │  发送用户输入
-  │←── session/update (thought) ────  │  推理过程（流式）
-  │←── session/update (tool_call) ──  │  工具调用通知
+  │─── session/prompt ──────────────→ │  send user input
+  │←── session/update (thought) ────  │  reasoning process (streaming)
+  │←── session/update (tool_call) ──  │  tool call notification
   │                                   │
-  │←── fs/read_text_file ───────────  │  Agent 请求读文件（反向请求!）
-  │─── response { content } ────────→ │  客户端返回文件内容
+  │←── fs/read_text_file ───────────  │  Agent requests file read (reverse request!)
+  │─── response { content } ────────→ │  client returns file content
   │                                   │
-  │←── session/update (chunk) ──────  │  响应内容（流式分块）
-  │←── session/update (chunk) ──────  │  继续流式
-  │←── PromptResponse (final) ──────  │  最终完成
+  │←── session/update (chunk) ──────  │  response content (streaming chunks)
+  │←── session/update (chunk) ──────  │  continue streaming
+  │←── PromptResponse (final) ──────  │  final completion
   │                                   │
-  │─── session/prompt ──────────────→ │  多轮：发送后续指令
+  │─── session/prompt ──────────────→ │  multi-turn: send follow-up
   │    ...                            │
   │                                   │
-  │─── session/cancel (notification)→ │  取消当前处理
+  │─── session/cancel (notification)→ │  cancel current processing
   │                                   │
 ```
 
-### 2.5 核心 JSON-RPC 方法完整列表
+### 2.5 Complete JSON-RPC Method List
 
-#### 客户端 → Agent（请求类）
+#### Client → Agent (Request type)
 
-| 方法 | 说明 | 参数 |
-|------|------|------|
-| `initialize` | 初始化连接，能力协商 | capabilities, clientInfo, protocolVersion |
-| `authenticate` | 认证（可选） | credentials |
-| `session/new` | 创建新会话 | label?, directory? |
-| `session/load` | 恢复已有会话 | sessionId |
-| `session/prompt` | 发送用户输入 | sessionId, content[], _meta? |
-| `session/set_mode` | 设置会话模式 | sessionId, mode |
-| `session/set_config_option` | 设置配置项 | sessionId, key, value |
+| Method | Description | Parameters |
+|--------|-------------|-----------|
+| `initialize` | Initialize connection, capability negotiation | capabilities, clientInfo, protocolVersion |
+| `authenticate` | Authentication (optional) | credentials |
+| `session/new` | Create new session | label?, directory? |
+| `session/load` | Resume existing session | sessionId |
+| `session/prompt` | Send user input | sessionId, content[], _meta? |
+| `session/set_mode` | Set session mode | sessionId, mode |
+| `session/set_config_option` | Set configuration option | sessionId, key, value |
 
-#### 客户端 → Agent（通知类）
+#### Client → Agent (Notification type)
 
-| 方法 | 说明 |
-|------|------|
-| `session/cancel` | 取消当前处理 |
-| `initialized` | 确认初始化完成 |
+| Method | Description |
+|--------|-------------|
+| `session/cancel` | Cancel current processing |
+| `initialized` | Confirm initialization complete |
 
-#### Agent → 客户端（流式 Notification）
+#### Agent → Client (Streaming Notifications)
 
-| 更新类型 | 说明 |
-|----------|------|
-| `agent_thought_chunk` | 推理过程输出（thinking/chain-of-thought） |
-| `agent_message_chunk` | 响应内容分块（最终输出的流式片段） |
-| `tool_call` | 工具调用声明（Agent 要执行什么工具） |
-| `tool_call_update` | 工具调用进度和结果 |
-| `plan` | 多步骤执行计划 |
+| Update Type | Description |
+|-------------|-------------|
+| `agent_thought_chunk` | Reasoning process output (thinking/chain-of-thought) |
+| `agent_message_chunk` | Response content chunks (streaming fragments of final output) |
+| `tool_call` | Tool call declaration (what tool the Agent intends to execute) |
+| `tool_call_update` | Tool call progress and result |
+| `plan` | Multi-step execution plan |
 
-#### Agent → 客户端（回调请求，需客户端响应）
+#### Agent → Client (Callback Requests, client must respond)
 
-这是 ACP 最独特的设计——**Agent 可以主动向客户端发起请求**：
+This is ACP's most distinctive design — **Agent can proactively send requests to the client**:
 
-| 方法 | 说明 | 权限控制 |
-|------|------|---------|
-| `fs/read_text_file` | 请求读取文件 | approve-reads 即可 |
-| `fs/write_text_file` | 请求写入文件 | 需要 approve-all |
-| `fs/list_directory` | 请求列出目录 | approve-reads 即可 |
-| `terminal/create` | 请求创建终端 | 需要 approve-all |
-| `terminal/output` | 接收终端输出 | - |
-| `terminal/wait_for_exit` | 等待命令结束 | - |
-| `terminal/kill` | 终止终端进程 | - |
+| Method | Description | Permission Control |
+|--------|-------------|-------------------|
+| `fs/read_text_file` | Request file read | approve-reads sufficient |
+| `fs/write_text_file` | Request file write | requires approve-all |
+| `fs/list_directory` | Request directory listing | approve-reads sufficient |
+| `terminal/create` | Request terminal creation | requires approve-all |
+| `terminal/output` | Receive terminal output | — |
+| `terminal/wait_for_exit` | Wait for command completion | — |
+| `terminal/kill` | Terminate terminal process | — |
 
-### 2.6 内容块（Content Blocks）
+### 2.6 Content Blocks
 
-`session/prompt` 支持富内容类型：
+`session/prompt` supports rich content types:
 
 ```json
 {
@@ -258,68 +256,68 @@ Client                              Agent
 }
 ```
 
-支持的类型：
-- **text**：纯文本
-- **image**：图像附件（含 MIME 类型）
-- **audio**：音频内容
-- **resources**：MCP resource 引用
+Supported types:
+- **text**: plain text
+- **image**: image attachment (with MIME type)
+- **audio**: audio content
+- **resources**: MCP resource references
 
-### 2.7 会话管理高级特性
+### 2.7 Advanced Session Management Features
 
-| 特性 | 方法/参数 | 说明 |
-|------|----------|------|
-| **持久化** | `session/load` + sessionId | 会话跨进程存活，可恢复 |
-| **命名** | label 参数 | 支持人类可读名称（如 "backend"、"frontend"） |
-| **重置** | `_meta.resetSession: true` | 清空对话历史但保留 session ID |
-| **分叉** | fork 能力 | 从已有会话派生新会话（保留部分上下文） |
-| **删除** | session/delete | 显式删除会话及其历史 |
-| **目录路由** | directory 参数 | 按工作目录自动匹配/创建会话 |
+| Feature | Method/Parameter | Description |
+|---------|-----------------|-------------|
+| **Persistence** | `session/load` + sessionId | Session survives across processes, resumable |
+| **Naming** | label parameter | Supports human-readable names (e.g. "backend", "frontend") |
+| **Reset** | `_meta.resetSession: true` | Clears conversation history while retaining session ID |
+| **Forking** | fork capability | Derive a new session from an existing one (retains partial context) |
+| **Deletion** | session/delete | Explicitly delete session and its history |
+| **Directory routing** | directory parameter | Auto-match/create session by working directory |
 
-### 2.8 与 LSP 的类比
+### 2.8 Analogy with LSP
 
-| 维度 | LSP | ACP |
-|------|-----|-----|
-| 目的 | 统一编辑器与语言服务器通信 | 统一编辑器与 AI agent 通信 |
-| 传输 | stdio / socket | stdio / HTTP / WebSocket |
-| 消息格式 | JSON-RPC 2.0 | JSON-RPC 2.0 |
-| 双向性 | 服务器可发诊断/补全 | Agent 可请求文件/终端 |
-| 能力协商 | 有 | 有 |
-| 会话状态 | 无（无状态） | 有（持久化会话） |
+| Dimension | LSP | ACP |
+|-----------|-----|-----|
+| Purpose | Unify editor-language server communication | Unify editor-AI agent communication |
+| Transport | stdio / socket | stdio / HTTP / WebSocket |
+| Message format | JSON-RPC 2.0 | JSON-RPC 2.0 |
+| Bidirectionality | Server can send diagnostics/completions | Agent can request files/terminals |
+| Capability negotiation | Yes | Yes |
+| Session state | None (stateless) | Yes (persistent sessions) |
 
 ---
 
-## 三、OpenClaw 与 acpx 架构
+## III. OpenClaw and acpx Architecture
 
-### 3.1 OpenClaw ACP Bridge 架构
+### 3.1 OpenClaw ACP Bridge Architecture
 
-OpenClaw 在标准 ACP 之上增加了一层 **WebSocket Gateway 中间层**：
+OpenClaw adds a **WebSocket Gateway middleware layer** on top of standard ACP:
 
 ```
 ┌────────────┐    ACP (stdio)    ┌──────────────────┐    WebSocket    ┌──────────────────┐
 │  IDE/Editor │ ←─────────────→  │ openclaw-acp-    │ ←────────────→ │ OpenClaw Gateway │
-│  (Zed 等)   │    NDJSON        │ bridge           │                │ (:18789)         │
+│  (Zed etc.) │    NDJSON        │ bridge           │                │ (:18789)         │
 └────────────┘                   └──────────────────┘                └──────────────────┘
 ```
 
-**消息翻译映射：**
+**Message translation mapping:**
 
-| ACP 消息 | OpenClaw Gateway 消息 |
-|----------|----------------------|
-| `initialize` | 连接并注册 |
-| `newSession` | 创建 `acp:<uuid>` 会话 |
-| `loadSession` | 恢复 Gateway 会话 |
+| ACP Message | OpenClaw Gateway Message |
+|-------------|-------------------------|
+| `initialize` | Connect and register |
+| `newSession` | Create `acp:<uuid>` session |
+| `loadSession` | Resume Gateway session |
 | `prompt` | → `chat.send` |
 | `cancel` | → `chat.abort` |
-| Gateway 流式事件 | → ACP `message` / `tool_call` updates |
+| Gateway streaming events | → ACP `message` / `tool_call` updates |
 
-**会话 Key 规则：**
-- 默认：`acp:<uuid>`（隔离会话）
-- 覆盖：`--session agent:main:main` 可指向已有 Gateway 会话
-- per-request：`_meta` 对象中含 `sessionKey`、`sessionLabel`、`resetSession`、`requireExisting`
+**Session Key rules:**
+- Default: `acp:<uuid>` (isolated session)
+- Override: `--session agent:main:main` can point to an existing Gateway session
+- Per-request: `_meta` object contains `sessionKey`, `sessionLabel`, `resetSession`, `requireExisting`
 
-### 3.2 acpx 架构
+### 3.2 acpx Architecture
 
-acpx 是 ACP 的 **无头 CLI 客户端（headless CLI client）**，专为 agent-to-agent 自动化设计：
+acpx is a **headless CLI client** for ACP, designed specifically for agent-to-agent automation:
 
 ```
 ┌──────────────────────────────────────────────────────┐
@@ -329,16 +327,16 @@ acpx 是 ACP 的 **无头 CLI 客户端（headless CLI client）**，专为 agen
 │  │  Session Manager                                 │  │
 │  │  ├── State: ~/.acpx/sessions/*.json             │  │
 │  │  ├── Directory-walk routing (git root match)    │  │
-│  │  ├── TTL-based queue ownership (默认 300s)      │  │
-│  │  └── IPC coordination (多实例协调)              │  │
+│  │  ├── TTL-based queue ownership (default 300s)   │  │
+│  │  └── IPC coordination (multi-instance)         │  │
 │  └─────────────────────────────────────────────────┘  │
 │                                                       │
 │  ┌─────────────────────────────────────────────────┐  │
 │  │  Output Formatter                                │  │
-│  │  ├── text       (人类可读)                       │  │
-│  │  ├── json       (自动化，含元数据)               │  │
-│  │  ├── json-strict (纯 JSON，无 stderr)           │  │
-│  │  └── quiet      (仅最终文本)                     │  │
+│  │  ├── text       (human-readable)                 │  │
+│  │  ├── json       (automation, with metadata)      │  │
+│  │  ├── json-strict (pure JSON, no stderr)          │  │
+│  │  └── quiet      (final text only)               │  │
 │  └─────────────────────────────────────────────────┘  │
 └──────────────────────┬───────────────────────────────┘
                        │ spawn as child process (stdio pipe)
@@ -346,53 +344,53 @@ acpx 是 ACP 的 **无头 CLI 客户端（headless CLI client）**，专为 agen
          ┌──────────────────────────────┐
          │       ACP Adapter Layer       │
          ├──────────────────────────────┤
-         │ claude-agent-acp → Claude Code│  (Zed 官方, npx)
-         │ codex-acp → Codex CLI        │  (Zed 官方, npx)
-         │ gemini (native) → Gemini CLI │  (原生 ACP)
-         │ opencode (native) → OpenCode │  (原生 ACP)
-         │ pi-acp → Pi Agent            │  (社区, npx)
-         │ kimi (native) → Kimi         │  (原生 ACP)
+         │ claude-agent-acp → Claude Code│  (Zed official, npx)
+         │ codex-acp → Codex CLI        │  (Zed official, npx)
+         │ gemini (native) → Gemini CLI │  (native ACP)
+         │ opencode (native) → OpenCode │  (native ACP)
+         │ pi-acp → Pi Agent            │  (community, npx)
+         │ kimi (native) → Kimi         │  (native ACP)
          └──────────────────────────────┘
 ```
 
-**acpx 进程模型——队列所有者模型：**
+**acpx process model — queue owner model:**
 
 ```
 acpx prompt "fix bug"
   │
-  ├── 查找现有 session（按 git root 匹配）
-  │   ├── 找到且进程存活 → 直接发送 prompt
-  │   ├── 找到但进程已死 → 重新 spawn + session/load 恢复
-  │   └── 未找到 → 创建新 session
+  ├── find existing session (match by git root)
+  │   ├── found and process alive → send prompt directly
+  │   ├── found but process dead → re-spawn + session/load to restore
+  │   └── not found → create new session
   │
-  └── Queue Owner 持有进程所有权
-      ├── 默认 TTL: 300s（空闲后释放）
-      ├── --ttl 0: 永久保活
-      └── 多 acpx 实例通过 IPC 协调
+  └── Queue Owner holds process ownership
+      ├── default TTL: 300s (release after idle)
+      ├── --ttl 0: keep alive permanently
+      └── multiple acpx instances coordinate via IPC
 ```
 
-**acpx CLI 命令：**
+**acpx CLI commands:**
 
-| 命令 | 功能 |
-|------|------|
-| `acpx <agent> prompt "..."` | 发送 prompt 到已有/新建会话 |
-| `acpx <agent> exec "..."` | 一次性临时会话（用完即弃） |
-| `acpx <agent> sessions list` | 列出所有会话 |
-| `acpx <agent> sessions new` | 显式创建新会话 |
-| `acpx <agent> sessions close` | 关闭会话 |
-| `acpx <agent> -s <name> "..."` | 指定命名会话（并行工作流） |
+| Command | Function |
+|---------|----------|
+| `acpx <agent> prompt "..."` | Send prompt to existing/new session |
+| `acpx <agent> exec "..."` | One-shot temporary session (disposable) |
+| `acpx <agent> sessions list` | List all sessions |
+| `acpx <agent> sessions new` | Explicitly create new session |
+| `acpx <agent> sessions close` | Close session |
+| `acpx <agent> -s <name> "..."` | Specify named session (parallel workflows) |
 
-**适配器内部架构（以 codex-acp 为例）：**
+**Adapter internal architecture (using codex-acp as example):**
 
-- **技术栈**：Rust + Tokio current-thread 异步运行时
-- **核心模块**：
-  - `agent/core.rs`：处理 ACP 请求（initialize, session/new, session/prompt 等）
-  - `agent/events.rs`：将 Codex 事件转换为 ACP update 通知
-  - `agent/commands.rs`：处理斜杠命令
-  - `SessionManager`：集中管理会话状态、客户端通知、上下文
-- **文件操作**：内置 MCP 服务器（acp_fs）处理，避免 shell 调用
+- **Tech stack**: Rust + Tokio current-thread async runtime
+- **Core modules**:
+  - `agent/core.rs`: handles ACP requests (initialize, session/new, session/prompt, etc.)
+  - `agent/events.rs`: converts Codex events into ACP update notifications
+  - `agent/commands.rs`: handles slash commands
+  - `SessionManager`: centralized session state, client notification, and context management
+- **File operations**: handled by built-in MCP server (acp_fs), avoiding shell calls
 
-**NDJSON 信封格式（稳定 schema）：**
+**NDJSON envelope format (stable schema):**
 
 ```json
 {
@@ -406,151 +404,151 @@ acpx prompt "fix bug"
 
 ---
 
-## 四、ACP 生态：支持的工具与平台
+## IV. ACP Ecosystem: Supported Tools and Platforms
 
-### 4.1 支持 ACP 的 Agent（28 个）
+### 4.1 Agents Supporting ACP (28 total)
 
-#### 原生支持（25 个）——Agent 自身实现了 ACP 协议
+#### Native Support (25) — Agent implements ACP protocol directly
 
-| Agent 名称 | 开发方 | 特点 | 成熟度 |
-|-----------|--------|------|--------|
-| **Gemini CLI** | Google | 深度代码库理解，多模态 | 高 |
-| **GitHub Copilot** | GitHub/Microsoft | AI 编程助手 | 公开预览版 |
-| **Junie** | JetBrains | JetBrains 官方 Agent | 高 |
-| **OpenClaw** | OpenClaw | 自托管，可作 Client 也可作 Agent | 中 |
-| **OpenCode** | 开源社区 | 完全开源 | 中 |
-| **Cline** | 开源社区 | 支持多编辑器（JetBrains/Zed/Neovim/Emacs） | 中 |
-| **Goose** | Block/Square | 开源 Agent | 中 |
-| **OpenHands** | 开源社区 | - | 中 |
-| **Kimi CLI** | Moonshot AI | 多语言支持 | 中 |
-| **Kiro CLI** | Amazon | - | 中 |
-| **Qwen Code** | 阿里 | 多语言支持强 | 中 |
-| Augment Code (Auggie) | Augment | 大规模重构 | 中 |
-| AutoDev | 开源 | 自动化开发 | 早期 |
-| Blackbox AI | Blackbox | 代码搜索生成 | 中 |
-| Docker cagent | Docker | 容器化 Agent | 早期 |
-| Factory Droid | Factory | 自动化工作流 | 早期 |
-| Mistral Vibe | Mistral AI | 轻量快速 | 早期 |
-| AgentPool, Code Assistant, fast-agent, fount, Minion Code, Qoder CLI, Stakpak, VT Code | 各方 | 其余 8 个 | 早期 |
+| Agent Name | Developer | Characteristics | Maturity |
+|-----------|-----------|----------------|---------|
+| **Gemini CLI** | Google | Deep codebase understanding, multimodal | High |
+| **GitHub Copilot** | GitHub/Microsoft | AI programming assistant | Public preview |
+| **Junie** | JetBrains | JetBrains official Agent | High |
+| **OpenClaw** | OpenClaw | Self-hosted, can act as Client or Agent | Medium |
+| **OpenCode** | Open source community | Fully open source | Medium |
+| **Cline** | Open source community | Multi-editor support (JetBrains/Zed/Neovim/Emacs) | Medium |
+| **Goose** | Block/Square | Open source Agent | Medium |
+| **OpenHands** | Open source community | — | Medium |
+| **Kimi CLI** | Moonshot AI | Multi-language support | Medium |
+| **Kiro CLI** | Amazon | — | Medium |
+| **Qwen Code** | Alibaba | Strong multi-language support | Medium |
+| Augment Code (Auggie) | Augment | Large-scale refactoring | Medium |
+| AutoDev | Open source | Automated development | Early |
+| Blackbox AI | Blackbox | Code search and generation | Medium |
+| Docker cagent | Docker | Containerized Agent | Early |
+| Factory Droid | Factory | Automated workflows | Early |
+| Mistral Vibe | Mistral AI | Lightweight and fast | Early |
+| AgentPool, Code Assistant, fast-agent, fount, Minion Code, Qoder CLI, Stakpak, VT Code | Various | Remaining 8 | Early |
 
-#### 通过适配器支持（3 个）——需要额外 ACP wrapper
+#### Via Adapter (3) — Requires additional ACP wrapper
 
-| Agent 名称 | 适配器 | 维护方 | 原因 |
-|-----------|--------|--------|------|
-| **Claude Code** | `@zed-industries/claude-agent-acp` | Zed 官方 | TUI 程序（Ink/React），无法直接说 JSON-RPC |
-| **Codex CLI** | `@zed-industries/codex-acp` | Zed 官方 | 同上，需要适配器翻译 |
-| **Pi** | `pi-acp` | 社区 | - |
+| Agent Name | Adapter | Maintainer | Reason |
+|-----------|---------|-----------|--------|
+| **Claude Code** | `@zed-industries/claude-agent-acp` | Zed official | TUI program (Ink/React), cannot speak JSON-RPC directly |
+| **Codex CLI** | `@zed-industries/codex-acp` | Zed official | Same; needs adapter for translation |
+| **Pi** | `pi-acp` | Community | — |
 
-**为什么 Claude Code 和 Codex 需要适配器？** 因为它们是 TUI（Text User Interface）程序，使用 Ink（基于 React 的终端 UI 框架）渲染界面，需要 raw mode TTY。它们原生通过终端字符流通信，不直接支持 JSON-RPC 消息交换。适配器的作用是在 ACP JSON-RPC 协议和底层 agent 的内部 API 之间做翻译。
+**Why do Claude Code and Codex need adapters?** Because they are TUI (Text User Interface) programs using Ink (a React-based terminal UI framework) to render their interface, requiring raw mode TTY. They natively communicate through terminal character streams and do not directly support JSON-RPC message exchange. The adapter's role is to translate between the ACP JSON-RPC protocol and the agent's internal API.
 
-### 4.2 支持 ACP 的 Client 端（编辑器/IDE）
+### 4.2 ACP Client Side (Editors/IDEs)
 
-| 编辑器 | 支持方式 | 状态 |
-|--------|---------|------|
-| **Zed** | 原生支持（ACP 发起者） | 生产就绪 |
-| **JetBrains IDEs** | AI Assistant 插件（2025.3.2+） | 生产就绪 |
-| **VS Code** | ACP Client 扩展 | 预览 |
-| **Neovim** | 社区插件 | 早期 |
-| **Emacs** | 社区插件 | 早期 |
-| **Obsidian** | obsidian-agent-client 插件 | 早期 |
-| **Marimo** | 数据科学 notebook | 早期 |
-| **acpx** | 无头 CLI 客户端 | Alpha |
+| Editor | Support Method | Status |
+|--------|---------------|--------|
+| **Zed** | Native support (ACP originator) | Production ready |
+| **JetBrains IDEs** | AI Assistant plugin (2025.3.2+) | Production ready |
+| **VS Code** | ACP Client extension | Preview |
+| **Neovim** | Community plugin | Early |
+| **Emacs** | Community plugin | Early |
+| **Obsidian** | obsidian-agent-client plugin | Early |
+| **Marimo** | Data science notebook | Early |
+| **acpx** | Headless CLI client | Alpha |
 
 ### 4.3 ACP Agent Registry
 
-JetBrains 于 2026 年 1 月上线了 **ACP Agent Registry**，作为 Agent 发现和分发的中心化平台（类似 npm registry 对 package 的作用），标志着 ACP 生态进入标准化阶段。
+JetBrains launched the **ACP Agent Registry** in January 2026 as a centralized platform for agent discovery and distribution (analogous to npm registry for packages), marking the ACP ecosystem's entry into the standardization phase.
 
 ---
 
-## 五、ACP 进程生命周期与已知问题
+## V. ACP Process Lifecycle and Known Issues
 
-### 5.1 进程模型
+### 5.1 Process Model
 
 ```
-acpx (或 OpenClaw)
+acpx (or OpenClaw)
   │ spawn child process
   │ stdio: ['pipe', 'pipe', 'inherit']
   ▼
-ACP Adapter (如 codex-acp)
+ACP Adapter (e.g. codex-acp)
   │ manage
   ▼
-Actual Agent Process (如 Codex CLI)
+Actual Agent Process (e.g. Codex CLI)
 ```
 
-**关键特征：**
-- acpx 通过 stdio pipe 与适配器通信
-- 适配器作为 agent 的管理进程
-- 形成两层进程树
+**Key characteristics:**
+- acpx communicates with the adapter via stdio pipe
+- Adapter acts as the agent's management process
+- Forms a two-layer process tree
 
-### 5.2 已知严重问题
+### 5.2 Known Serious Issues
 
-#### 问题 1：PTY 崩溃（Issue #28786）
+#### Issue 1: PTY Crash (Issue #28786)
 
-**状态**：已于 2026-03-04 修复（PR #34020）
+**Status**: Fixed on 2026-03-04 (PR #34020)
 
-**现象**：acpx 以 pipe 模式 spawn Claude Code/Codex 子进程，但这两个工具都需要 raw mode TTY（基于 Ink/React 的终端 UI），导致启动后立即崩溃：
+**Symptom**: acpx spawns Claude Code/Codex child processes in pipe mode, but both tools require raw mode TTY (Ink/React-based terminal UI), causing them to crash immediately after launch:
 
 ```
 Raw mode is not supported on the current process.stdin
 ```
 
-**影响**：`sessions_spawn runtime="acp"` 持续失败，claude 和 codex 两个主力 Agent 都无法使用。
+**Impact**: `sessions_spawn runtime="acp"` consistently fails; claude and codex — the two primary agents — cannot be used.
 
-**修复**：session-bootstrap 可靠性改进，包含回退硬化和显式失败处理。
+**Fix**: Session-bootstrap reliability improvements including fallback hardening and explicit failure handling.
 
-#### 问题 2：静默权限失败（Issue #29195）
+#### Issue 2: Silent Permission Failure (Issue #29195)
 
-**状态**：未完全解决
+**Status**: Not fully resolved
 
-**现象**：默认的 `permissionMode: approve-reads` 在非交互模式下，导致 Codex 的写文件/执行命令请求被静默拒绝。错误仅记录在内部日志，不通知调用方。`sessions_spawn` 返回 "accepted" 后，进程悄然进入僵尸状态。
+**Symptom**: The default `permissionMode: approve-reads` in non-interactive mode causes Codex's write-file/execute-command requests to be silently rejected. Errors are only logged internally and the caller is not notified. `sessions_spawn` returns "accepted" and then the process quietly enters a zombie state.
 
-**后果**：
-- 父 Agent 无法监控子 ACP 会话进度（forbidden 错误）
-- Codex 进程在"完成"后持续运行 80+ 分钟（0% CPU）不退出
-- 调用方以为任务成功，实际什么都没做
+**Consequences**:
+- Parent agent cannot monitor child ACP session progress (forbidden errors)
+- Codex process continues running 80+ minutes (0% CPU) without exiting after "completion"
+- Caller believes the task succeeded; nothing was actually done
 
-**缓解配置**：
+**Mitigation configuration**:
 ```bash
 openclaw config set plugins.entries.acpx.config.permissionMode approve-all
 openclaw config set plugins.entries.acpx.config.nonInteractivePermissions fail
 ```
 
-#### 问题 3：孤儿进程与僵尸进程
+#### Issue 3: Orphan Processes and Zombie Processes
 
-**现象**：当 acpx/OpenClaw 主进程异常退出时：
-- 子 agent 进程变成孤儿进程（orphan process）
-- 由于 stdio pipe 断裂，agent 收不到新指令也发不出响应
-- 但 agent 进程本身不一定退出——缺乏超时机制，可能无限期占用资源
-- 已有记录显示 Codex 进程运行 80+ 分钟不退出
+**Symptom**: When the acpx/OpenClaw main process exits abnormally:
+- Child agent processes become orphan processes
+- Due to stdio pipe breakage, the agent cannot receive new instructions or send responses
+- But the agent process itself doesn't necessarily exit — no timeout mechanism; may occupy resources indefinitely
+- Documented cases of Codex processes running 80+ minutes without exiting
 
-**acpx 的崩溃恢复机制**：
-1. 下次调用时检测到已保存的 session PID 已死亡
-2. 自动重新 spawn Agent，尝试 `session/load` 恢复会话
-3. 失败时透明回退到 `session/new`（丢失之前的上下文）
+**acpx crash recovery mechanism**:
+1. Next invocation detects that the saved session PID has died
+2. Automatically re-spawns the Agent, attempts `session/load` to restore the session
+3. Transparently falls back to `session/new` on failure (losing previous context)
 
-### 5.3 与 tmux 方案的进程稳定性对比
+### 5.3 Process Stability Comparison with tmux Approach
 
-| 场景 | acpx/ACP | tmux (tcd) |
-|------|----------|------------|
-| **主控进程崩溃** | Agent 变孤儿，通信断裂，状态不确定 | **tmux session 完全不受影响**，tmux server 独立运行 |
-| **Agent 进程崩溃** | acpx 下次调用时尝试恢复（可能丢上下文） | tcd 通过 `has-session` 检测退出，从 `.log` 收集最后输出 |
-| **长时间运行** | 可能出现僵尸进程（无超时机制） | tmux session 稳定运行，可无限期 |
-| **多 Agent 并行** | 支持命名会话，受 `maxConcurrentSessions` 限制 | 每个 tmux session 完全独立，无限制 |
-| **可见性** | 无 PTY，输出仅通过 ACP 协议传递，调试困难 | **`tmux attach` 直接看到 Agent 实时 TUI 输出** |
-| **权限控制** | 非交互模式下权限提示导致静默失败 | 可通过 `send-keys` 模拟交互确认 |
+| Scenario | acpx/ACP | tmux (tcd) |
+|----------|----------|------------|
+| **Controller process crashes** | Agent becomes orphan; communication breaks; state uncertain | **tmux session completely unaffected**; tmux server runs independently |
+| **Agent process crashes** | acpx attempts recovery on next invocation (may lose context) | tcd detects exit via `has-session`; collects last output from `.log` |
+| **Long-running tasks** | May produce zombie processes (no timeout mechanism) | tmux sessions run stably; no time limit |
+| **Multiple parallel agents** | Named sessions supported; limited by `maxConcurrentSessions` | Each tmux session fully independent; no limit |
+| **Visibility** | No PTY; output only via ACP protocol; debugging is difficult | **`tmux attach` shows Agent real-time TUI output directly** |
+| **Permission control** | Permission prompts in non-interactive mode cause silent failures | Can simulate interactive confirmation via `send-keys` |
 
 ---
 
-## 六、Claude Code 与 ACP 的关系
+## VI. Claude Code and ACP Relationship
 
-### 6.1 角色澄清
+### 6.1 Role Clarification
 
-**ACP 协议定义了两种角色：**
+**ACP protocol defines two roles:**
 
 ```
 ┌─────────────────┐                    ┌──────────────────┐
 │   ACP Client     │  ←── ACP ────→    │   ACP Agent      │
-│   (发起方)       │                    │   (响应方)        │
+│   (initiator)    │                    │   (responder)     │
 │                  │                    │                   │
 │  - Zed           │                    │  - Claude Code    │
 │  - JetBrains     │                    │  - Codex CLI      │
@@ -559,40 +557,40 @@ openclaw config set plugins.entries.acpx.config.nonInteractivePermissions fail
 │  - OpenClaw*     │                    │  - Cline          │
 └─────────────────┘                    └──────────────────┘
 
-* OpenClaw 可同时扮演两种角色
+* OpenClaw can play both roles
 ```
 
-**关键结论：Claude Code 在 ACP 中是 Agent（服务端），不是 Client（客户端）。**
+**Key conclusion: In ACP, Claude Code is an Agent (server side), not a Client (client side).**
 
-这意味着：
-1. Claude Code 可以**被** IDE/acpx 通过 ACP 调用
-2. Claude Code **不能**通过 ACP 主动调用其他 Agent（如 Codex）
-3. ACP 协议设计中，客户端是编辑器/IDE，不是 AI Agent
+This means:
+1. Claude Code **can be** called by an IDE/acpx via ACP
+2. Claude Code **cannot** proactively call other Agents (like Codex) via ACP
+3. In ACP's protocol design, the client is the editor/IDE, not the AI Agent
 
-### 6.2 Claude Code 调用 Codex CLI 的可行方案
+### 6.2 Viable Options for Claude Code to Call Codex CLI
 
-| 方案 | 路径 | 结构化输出 | 会话管理 | 推荐度 |
-|------|------|----------|---------|--------|
-| **A. tcd（本项目）** | Claude Code → bash → `tcd start -p codex` → tmux → Codex | 有（JSON） | 有（多轮） | 最高 |
-| **B. MCP 工具** | Claude Code → MCP → `codex-subagents-mcp` → Codex 子进程 | 有 | 无（单次） | 高 |
-| **C. 直接 Shell** | Claude Code → bash → `codex -q "prompt"` | 无 | 无 | 中 |
-| **D. OpenClaw 编排** | OpenClaw 作为 ACP Client 同时调度 Claude + Codex | 有 | 有 | 中 |
-| **E. ACP 直接调用** | Claude Code → ACP → Codex | **不可行** | - | 不可行 |
+| Option | Path | Structured Output | Session Management | Recommendation |
+|--------|------|------------------|-------------------|---------------|
+| **A. tcd (this project)** | Claude Code → bash → `tcd start -p codex` → tmux → Codex | Yes (JSON) | Yes (multi-turn) | Highest |
+| **B. MCP tool** | Claude Code → MCP → `codex-subagents-mcp` → Codex subprocess | Yes | No (single-call) | High |
+| **C. Direct shell** | Claude Code → bash → `codex -q "prompt"` | No | No | Medium |
+| **D. OpenClaw orchestration** | OpenClaw as ACP Client scheduling Claude + Codex simultaneously | Yes | Yes | Medium |
+| **E. Direct ACP call** | Claude Code → ACP → Codex | **Not feasible** | — | Not feasible |
 
-**方案 A（tcd）的核心优势**：
-- 进程隔离好（tmux session 独立）
-- 支持多轮对话（`tcd send` 追加指令）
-- 可调试（`tcd attach` 看实时输出）
-- 结果收集完整（ANSI 清理 + 多策略 fallback）
-- 不依赖 agent 实现任何协议
+**Core advantages of Option A (tcd)**:
+- Good process isolation (tmux session is independent)
+- Supports multi-turn conversation (`tcd send` for follow-up)
+- Debuggable (`tcd attach` for real-time output)
+- Complete result collection (ANSI cleanup + multi-strategy fallback)
+- Does not require the agent to implement any protocol
 
-**方案 B（MCP）的部署步骤**：
+**Option B (MCP) deployment steps**:
 
 ```bash
-# 1. 安装 MCP 服务器
+# 1. Install MCP server
 npm install -g codex-subagents-mcp
 
-# 2. 配置 Claude Code 的 MCP
+# 2. Configure Claude Code MCP
 # ~/.claude/mcp_settings.json
 {
   "mcpServers": {
@@ -603,39 +601,39 @@ npm install -g codex-subagents-mcp
   }
 }
 
-# 3. Claude Code 即可通过 MCP 工具调用 Codex
+# 3. Claude Code can now call Codex via MCP tools
 ```
 
 ---
 
-## 七、OpenClaw ACP 配置与部署
+## VII. OpenClaw ACP Configuration and Deployment
 
-OpenClaw 支持两种 ACP 集成模式：
+OpenClaw supports two ACP integration modes:
 
-### 模式 1：OpenClaw 作为 ACP Client（通过 acpx 调用外部 Agent）
+### Mode 1: OpenClaw as ACP Client (calling external agents via acpx)
 
-**适用场景**：让 OpenClaw 调度 Codex、Claude Code、Gemini CLI 等 Agent 执行编码任务。
+**Use case**: Let OpenClaw schedule Codex, Claude Code, Gemini CLI and other agents to execute coding tasks.
 
 ```
-OpenClaw → acpx 插件 → ACP 适配器 → Agent 进程
+OpenClaw → acpx plugin → ACP adapter → Agent process
 ```
 
-**部署步骤：**
+**Deployment steps:**
 
 ```bash
-# Step 1: 安装 acpx 插件
+# Step 1: Install acpx plugin
 openclaw plugins install acpx
 openclaw config set plugins.entries.acpx.enabled true
 
-# Step 2: 配置权限（关键!否则写操作静默失败）
+# Step 2: Configure permissions (critical! otherwise write operations silently fail)
 openclaw config set plugins.entries.acpx.config.permissionMode approve-all
 openclaw config set plugins.entries.acpx.config.nonInteractivePermissions fail
 
-# Step 3: 健康检查
+# Step 3: Health check
 /acp doctor
 ```
 
-**openclaw.json 配置：**
+**openclaw.json configuration:**
 
 ```json5
 {
@@ -647,32 +645,32 @@ openclaw config set plugins.entries.acpx.config.nonInteractivePermissions fail
     allowedAgents: ["pi", "claude", "codex", "opencode", "gemini", "kimi"],
     maxConcurrentSessions: 8,
     stream: {
-      coalesceIdleMs: 300,     // 流式输出合并间隔
-      maxChunkChars: 1200,     // 单块最大字符数
+      coalesceIdleMs: 300,     // streaming output coalesce interval
+      maxChunkChars: 1200,     // max chars per chunk
     },
     runtime: {
-      ttlMinutes: 120,         // 会话空闲超时
+      ttlMinutes: 120,         // session idle timeout
     },
   },
 }
 ```
 
-### 模式 2：OpenClaw 作为 ACP Agent（供 IDE 调用）
+### Mode 2: OpenClaw as ACP Agent (called by IDEs)
 
-**适用场景**：让 Zed/JetBrains 等 IDE 通过 ACP 调用 OpenClaw。
+**Use case**: Let Zed/JetBrains and other IDEs call OpenClaw via ACP.
 
 ```
 IDE (Zed) → ACP stdio → openclaw acp → WebSocket → OpenClaw Gateway
 ```
 
-**部署步骤：**
+**Deployment steps:**
 
 ```bash
-# Step 1: 配置 Gateway 连接
+# Step 1: Configure Gateway connection
 openclaw config set gateway.remote.url wss://gateway-host:18789
-openclaw config set gateway.remote.token-file ~/.openclaw-token  # 推荐用 token-file
+openclaw config set gateway.remote.token-file ~/.openclaw-token  # recommended: use token-file
 
-# Step 2: 在 Zed settings.json 中注册
+# Step 2: Register in Zed settings.json
 ```
 
 ```json
@@ -688,196 +686,196 @@ openclaw config set gateway.remote.token-file ~/.openclaw-token  # 推荐用 tok
 ```
 
 ```bash
-# Step 3: 可选 - 会话路由到特定 Agent
+# Step 3: Optional - route session to a specific Agent
 openclaw acp --session agent:main:main
 openclaw acp --session agent:design:main --label "design-work"
 ```
 
 ---
 
-## 八、ACP vs tmux 方案：系统对比
+## VIII. ACP vs tmux Approach: System Comparison
 
-### 8.1 架构层面
+### 8.1 Architecture Level
 
-| 维度 | ACP 协议 | tmux/PTY 方案 (tcd) |
-|------|----------|-------------------|
-| **通信层** | JSON-RPC 2.0 over stdio pipe | 二进制字符流（终端仿真） |
-| **消息语义** | 结构化 JSON，含方法名、参数、元数据 | 原始字符 I/O，无语义分层 |
-| **状态追踪** | 显式会话 ID + 协议级状态 | 终端状态隐式，需解析 ANSI 码推断 |
-| **双向通信** | 原生支持（Agent 可主动请求文件/终端） | 单向 I/O 重定向（只能注入和读取） |
-| **权限控制** | 显式能力声明 + 权限门控（approve-reads/all） | 命令直接执行，无拦截层 |
-| **完成检测** | 协议内建 `PromptResponse` 消息 | 三策略 fallback（signal/marker/空闲检测） |
-| **输出解析** | 结构化 JSON，零解析成本 | 需 ANSI 转义码清理，脆弱 |
-| **并发管理** | 多会话原生支持，IPC 协调 | 每 Job 一个独立 tmux session |
+| Dimension | ACP Protocol | tmux/PTY Approach (tcd) |
+|-----------|-------------|------------------------|
+| **Communication layer** | JSON-RPC 2.0 over stdio pipe | Binary character stream (terminal emulation) |
+| **Message semantics** | Structured JSON with method name, parameters, metadata | Raw character I/O; no semantic layering |
+| **State tracking** | Explicit session ID + protocol-level state | Terminal state implicit; must infer from ANSI codes |
+| **Bidirectional communication** | Native support (Agent can proactively request files/terminals) | Unidirectional I/O redirection (inject and read only) |
+| **Permission control** | Explicit capability declaration + permission gating (approve-reads/all) | Commands execute directly; no interception layer |
+| **Completion detection** | Protocol-native `PromptResponse` message | Three-strategy fallback (signal/marker/idle detection) |
+| **Output parsing** | Structured JSON; zero parsing cost | Requires ANSI escape code cleanup; fragile |
+| **Concurrency management** | Multi-session native support; IPC coordination | One independent tmux session per job |
 
-### 8.2 运维层面
+### 8.2 Operations Level
 
-| 维度 | ACP/acpx | tmux (tcd) |
-|------|----------|------------|
-| **进程稳定性** | Alpha，有已知严重 bug | 久经考验，30+ 年历史 |
-| **进程隔离** | 子进程模型，有孤儿进程风险 | tmux session 天然隔离，与控制方解耦 |
-| **可调试性** | 无 PTY，只能看 JSON 日志 | `tcd attach` 直接看 Agent 实时 TUI |
-| **崩溃恢复** | 有协议级恢复（但实现不成熟） | tmux session 不受控制方崩溃影响 |
-| **依赖链** | Node.js + npx + 适配器 + ACP 协议栈 | tmux + Python（极简） |
-| **通用性** | 仅支持实现了 ACP 的 Agent | 任意终端程序，零适配成本 |
+| Dimension | ACP/acpx | tmux (tcd) |
+|-----------|----------|------------|
+| **Process stability** | Alpha; serious known bugs | Battle-tested; 30+ year history |
+| **Process isolation** | Subprocess model; orphan process risk | tmux session naturally isolated from controller |
+| **Debuggability** | No PTY; can only see JSON logs | `tcd attach` shows Agent real-time TUI directly |
+| **Crash recovery** | Protocol-level recovery (implementation immature) | tmux session unaffected by controller crashes |
+| **Dependency chain** | Node.js + npx + adapter + ACP stack | tmux + Python (minimal) |
+| **Generality** | Only supports ACP-implementing agents | Any terminal program; zero adaptation cost |
 
-### 8.3 功能层面
+### 8.3 Feature Level
 
-| 功能 | ACP | tcd (tmux) |
-|------|-----|------------|
-| **启动 Agent** | `acpx codex prompt "..."` | `tcd start -p codex -m "..."` |
-| **多轮对话** | `session/prompt` 到同一 session | `tcd send <id> "..."` |
-| **完成检测** | 协议内建（零延迟） | 三策略 fallback（1-20s 延迟） |
-| **取消操作** | `session/cancel`（协议级） | `Ctrl+C` send-keys（不保证生效） |
-| **获取输出** | JSON 流式分块 | `tcd output`（ANSI 清理后） |
-| **并行任务** | 命名会话（`-s backend`） | 多 tmux session |
-| **Agent 切换** | 同一接口切换 agent | 同一接口切换 provider |
-| **会话恢复** | `session/load`（协议级） | tmux session 持久化 |
-| **实时观察** | 无（JSON 日志） | `tcd attach` |
+| Feature | ACP | tcd (tmux) |
+|---------|-----|------------|
+| **Launch Agent** | `acpx codex prompt "..."` | `tcd start -p codex -m "..."` |
+| **Multi-turn conversation** | `session/prompt` to same session | `tcd send <id> "..."` |
+| **Completion detection** | Protocol-native (zero latency) | Three-strategy fallback (1–20s latency) |
+| **Cancel operation** | `session/cancel` (protocol level) | `Ctrl+C` send-keys (not guaranteed) |
+| **Get output** | JSON streaming chunks | `tcd output` (after ANSI cleanup) |
+| **Parallel tasks** | Named sessions (`-s backend`) | Multiple tmux sessions |
+| **Agent switching** | Same interface, switch agent | Same interface, switch provider |
+| **Session recovery** | `session/load` (protocol level) | tmux session persistence |
+| **Real-time observation** | None (JSON logs) | `tcd attach` |
 
-### 8.4 调用同一个 Agent 时的具体差异
+### 8.4 Calling the Same Agent: Specific Differences
 
-以调用 Codex CLI 为例：
+Using Codex CLI as an example:
 
-| 环节 | tcd (tmux) | ACP/acpx |
-|------|-----------|----------|
-| 启动 | `tmux new-session` + `script` 录制 + `codex` CLI | `acpx codex prompt "..."` → spawn `codex-acp` 适配器 |
-| 发送 prompt | `tmux send-keys '文本' Enter`（字符注入） | `session/prompt` JSON-RPC 消息 |
-| 接收输出 | `tmux capture-pane` + ANSI 清理 + marker 扫描 | 收取 `session/update` NDJSON 流 |
-| 完成检测 | signal file → marker → 空闲检测（三层 fallback） | `PromptResponse` 消息明确标记 |
-| 多轮对话 | `tmux send-keys` 再次注入 | `session/prompt` 同一 session |
-| 结果解析 | 从 JSONL session file / capture-pane 提取 | 直接取 JSON content 字段 |
+| Stage | tcd (tmux) | ACP/acpx |
+|-------|-----------|----------|
+| Launch | `tmux new-session` + `script` recording + `codex` CLI | `acpx codex prompt "..."` → spawn `codex-acp` adapter |
+| Send prompt | `tmux send-keys 'text' Enter` (character injection) | `session/prompt` JSON-RPC message |
+| Receive output | `tmux capture-pane` + ANSI cleanup + marker scan | Receive `session/update` NDJSON stream |
+| Completion detection | signal file → marker → idle detection (three-layer fallback) | `PromptResponse` message explicitly marks completion |
+| Multi-turn | `tmux send-keys` inject again | `session/prompt` to same session |
+| Result parsing | Extract from JSONL session file / capture-pane | Take JSON content field directly |
 
-**一句话总结**：tmux 是在终端里"假装是人在打字和看屏幕"，ACP 是程序间的结构化对话。
-
----
-
-## 九、用户体验维度分析
-
-### 9.1 ACP 的用户体验优势
-
-1. **输出质量高**：JSON 结构化输出，不需要 ANSI 清理，不会截断，不丢字符
-2. **完成检测可靠**：协议级 `PromptResponse`，不需要 marker hack 和空闲猜测
-3. **实时流式反馈**：思考过程、工具调用、响应分块都有独立事件，可做精细 UI 呈现
-4. **取消操作可靠**：`session/cancel` 一发就停
-5. **权限可控**：可拦截 agent 的文件写入和命令执行
-6. **IDE 原生集成**：Zed、JetBrains、Neovim 都已支持，用户体验更流畅
-7. **会话管理丰富**：命名、分叉、重置、跨进程恢复
-
-### 9.2 ACP 的用户体验劣势
-
-1. **Agent 覆盖有限**：只能驱动有 ACP 适配器的 Agent，无法驱动任意 CLI
-2. **额外依赖**：需要 Node.js（npx 下载适配器），增加环境配置成本
-3. **Alpha 阶段不稳定**：已知 PTY 崩溃、静默权限失败等严重问题
-4. **调试困难**：无法像 tmux attach 那样直接"看到" agent 在干什么
-5. **孤儿进程**：主控崩溃后 agent 可能变僵尸，用户需手动清理
-6. **配置复杂**：权限配置不当会导致静默失败，排查困难
-
-### 9.3 tmux (tcd) 的用户体验优势
-
-1. **通用性强**：任何能在终端跑的程序都能被驱动，不需要目标程序做任何适配
-2. **可调试性强**：`tcd attach` 直接看到 agent 的实时 TUI 输出，问题一目了然
-3. **零额外依赖**：只需 tmux + Python
-4. **进程稳定**：tmux 是 Unix 基石级工具，30+ 年历史
-5. **低延迟启动**：不需要协议握手和能力协商
-6. **进程隔离完美**：tmux session 独立于所有控制方进程
-
-### 9.4 tmux (tcd) 的用户体验劣势
-
-1. **ANSI 解析脆弱**：输出清理是永远的痛点，AI CLI 的 TUI 渲染千变万化
-2. **完成检测有延迟**：最差情况需 15-20s 空闲检测，marker 协议不保证被遵守
-3. **取消不可靠**：`send-keys Ctrl+C` 不保证 agent 正确响应
-4. **无权限拦截**：agent 在 tmux 中可执行任何操作
-5. **输出不结构化**：需要额外解析才能提取有用信息
+**One-sentence summary**: tmux is "pretending to be a human typing and looking at the screen in a terminal"; ACP is structured dialogue between programs.
 
 ---
 
-## 十、tcd 项目的演进建议
+## IX. User Experience Dimension Analysis
 
-### 10.1 短期策略（当下）
+### 9.1 ACP User Experience Advantages
 
-**继续坚持 tmux 方案。** 理由：
-- tcd 已完成 Phase 1-4，119 tests 通过，是可用的工具
-- ACP/acpx 仍有严重已知 bug（PTY 崩溃刚修复，静默权限失败未解决）
-- Claude Code → Codex 这个核心场景，ACP 根本做不到（角色模型限制），tcd 天然支持
-- tmux 的通用性保证了对任何新 CLI 工具的即时支持
+1. **High output quality**: JSON structured output; no ANSI cleanup needed; no truncation; no dropped characters
+2. **Reliable completion detection**: protocol-level `PromptResponse`; no marker hacks or idle guessing
+3. **Real-time streaming feedback**: reasoning process, tool calls, and response chunks all have independent events, enabling refined UI rendering
+4. **Reliable cancel**: `session/cancel` stops immediately
+5. **Controllable permissions**: can intercept agent file writes and command execution
+6. **Native IDE integration**: Zed, JetBrains, Neovim all supported; smoother user experience
+7. **Rich session management**: naming, forking, reset, cross-process recovery
 
-### 10.2 中期策略（3-6 个月）
+### 9.2 ACP User Experience Disadvantages
 
-**观察 ACP 生态成熟度**，关注以下信号：
-- acpx 从 alpha 进入 beta/stable
-- 静默权限失败问题彻底解决
-- 孤儿进程问题有正式的超时/清理机制
-- Claude Code 或 Codex 原生支持 ACP（不需要适配器）
+1. **Limited agent coverage**: can only drive agents with ACP adapters; cannot drive arbitrary CLIs
+2. **Extra dependencies**: requires Node.js (npx downloads adapters); increases environment setup cost
+3. **Alpha instability**: serious known issues (PTY crash just fixed, silent permission failure unresolved)
+4. **Difficult to debug**: cannot "see" what the agent is doing as directly as with tmux attach
+5. **Orphan processes**: agent may become zombie after controller crashes; user must clean up manually
+6. **Complex configuration**: misconfigured permissions cause silent failures that are hard to diagnose
 
-### 10.3 长期策略（6-12 个月）
+### 9.3 tmux (tcd) User Experience Advantages
 
-**考虑混合架构**——保留 tmux 做进程隔离容器，对支持 ACP 的 Agent 用 ACP 替换通信层：
+1. **Strong generality**: any program that runs in a terminal can be driven; no adaptation needed from target program
+2. **Strong debuggability**: `tcd attach` shows the agent's real-time TUI output directly; issues immediately visible
+3. **Zero extra dependencies**: only tmux + Python
+4. **Process stability**: tmux is a Unix cornerstone tool; 30+ year history
+5. **Low-latency launch**: no protocol handshake or capability negotiation needed
+6. **Perfect process isolation**: tmux session is independent from all controller processes
+
+### 9.4 tmux (tcd) User Experience Disadvantages
+
+1. **Fragile ANSI parsing**: output cleanup is a perpetual pain point; AI CLI TUI rendering varies endlessly
+2. **Completion detection latency**: worst case requires 15–20s idle detection; marker protocol is not guaranteed
+3. **Cancel unreliable**: `send-keys Ctrl+C` does not guarantee the agent responds correctly
+4. **No permission interception**: agent in tmux can execute any operation
+5. **Unstructured output**: additional parsing needed to extract useful information
+
+---
+
+## X. tcd Project Evolution Recommendations
+
+### 10.1 Short-term Strategy (now)
+
+**Continue with the tmux approach.** Rationale:
+- tcd has completed Phases 1–4 with 119 tests passing; it is a usable tool
+- ACP/acpx still has serious known bugs (PTY crash just fixed; silent permission failure unresolved)
+- The core scenario of Claude Code → Codex is fundamentally impossible with ACP (role model limitation); tcd supports it naturally
+- tmux's generality guarantees instant support for any new CLI tool
+
+### 10.2 Medium-term Strategy (3–6 months)
+
+**Monitor ACP ecosystem maturity**, watching for these signals:
+- acpx moves from alpha to beta/stable
+- Silent permission failure issue fully resolved
+- Orphan process issue has an official timeout/cleanup mechanism
+- Claude Code or Codex natively supports ACP (no adapter needed)
+
+### 10.3 Long-term Strategy (6–12 months)
+
+**Consider hybrid architecture** — retain tmux for process isolation container; use ACP to replace the communication layer for agents that support it:
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                    tcd v2（混合架构）                  │
+│                    tcd v2 (hybrid architecture)       │
 │                                                       │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  │
 │  │ ACP Channel  │  │ PTY Channel  │  │ Hybrid      │  │
-│  │ (结构化)     │  │ (通用)       │  │ Channel     │  │
+│  │ (structured) │  │ (universal)  │  │ Channel     │  │
 │  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘  │
 │         │                │                │           │
 │         ▼                ▼                ▼           │
-│   支持 ACP 的 Agent  不支持 ACP 的     tmux 隔离 +    │
-│   (Claude, Codex)   CLI 工具         ACP 通信        │
+│   ACP-supporting     Non-ACP CLI       tmux isolation │
+│   Agents             tools             + ACP comms    │
+│   (Claude, Codex)                                     │
 └─────────────────────────────────────────────────────┘
 ```
 
-**混合方案的价值**：
-- tmux 继续提供进程隔离和可调试性
-- ACP 解决 ANSI 解析脆弱和完成检测不可靠的痛点
-- 不支持 ACP 的 Agent 继续走 PTY 降级路径
-- 渐进式迁移，风险可控
+**Value of the hybrid approach**:
+- tmux continues providing process isolation and debuggability
+- ACP solves the fragile ANSI parsing and unreliable completion detection pain points
+- Non-ACP agents continue via PTY fallback path
+- Gradual migration; risk is controllable
 
-### 10.4 决策矩阵
+### 10.4 Decision Matrix
 
-| 条件 | 行动 |
-|------|------|
-| acpx 仍是 alpha + 有严重 bug | 维持 tmux 方案 |
-| acpx 稳定 + Agent 覆盖广 | 评估混合架构 POC |
-| Claude Code 原生支持 ACP | 优先为 Claude Provider 接入 ACP |
-| 新 CLI 工具不支持 ACP | 保留 tmux PTY 通道 |
+| Condition | Action |
+|-----------|--------|
+| acpx still alpha + serious bugs | Maintain tmux approach |
+| acpx stable + broad agent coverage | Evaluate hybrid architecture POC |
+| Claude Code natively supports ACP | Prioritize connecting ACP for Claude Provider |
+| New CLI tool doesn't support ACP | Retain tmux PTY channel |
 
 ---
 
-## 十一、参考资料
+## XI. References
 
-### 协议规范与官方文档
-- [Agent Client Protocol 官网](https://agentclientprotocol.com/)
-- [ACP 协议规范 GitHub](https://github.com/agentclientprotocol/agent-client-protocol)
-- [ACP 协议概览 (hexdocs/acpex)](https://hexdocs.pm/acpex/protocol_overview.html)
-- [Zed ACP 页面](https://zed.dev/acp)
-- [JetBrains ACP 文档](https://www.jetbrains.com/help/ai-assistant/acp.html)
+### Protocol Specifications and Official Documentation
+- [Agent Client Protocol website](https://agentclientprotocol.com/)
+- [ACP Protocol Specification GitHub](https://github.com/agentclientprotocol/agent-client-protocol)
+- [ACP Protocol Overview (hexdocs/acpex)](https://hexdocs.pm/acpex/protocol_overview.html)
+- [Zed ACP page](https://zed.dev/acp)
+- [JetBrains ACP documentation](https://www.jetbrains.com/help/ai-assistant/acp.html)
 
-### OpenClaw 与 acpx
-- [acpx GitHub 仓库](https://github.com/openclaw/acpx)
+### OpenClaw and acpx
+- [acpx GitHub repository](https://github.com/openclaw/acpx)
 - [acpx AGENTS.md](https://github.com/openclaw/acpx/blob/main/AGENTS.md)
-- [OpenClaw ACP Agents 文档](https://docs.openclaw.ai/tools/acp-agents)
+- [OpenClaw ACP Agents documentation](https://docs.openclaw.ai/tools/acp-agents)
 - [OpenClaw docs.acp.md](https://github.com/openclaw/openclaw/blob/main/docs.acp.md)
-- [OpenClaw ACP 2026 完整指南](https://dev.to/czmilo/2026-complete-guide-openclaw-acp-bridge-your-ide-to-ai-agents-3hl8)
+- [OpenClaw ACP 2026 Complete Guide](https://dev.to/czmilo/2026-complete-guide-openclaw-acp-bridge-your-ide-to-ai-agents-3hl8)
 
-### 适配器
+### Adapters
 - [zed-industries/claude-agent-acp](https://github.com/zed-industries/claude-agent-acp)
-- [codex-acp 适配器](https://github.com/cola-io/codex-acp)
+- [codex-acp adapter](https://github.com/cola-io/codex-acp)
 - [codex-subagents-mcp](https://github.com/leonardsellem/codex-subagents-mcp)
 
-### 分析与评论
+### Analysis and Commentary
 - [PromptLayer: ACP - The LSP for AI Coding Agents](https://blog.promptlayer.com/agent-client-protocol-the-lsp-for-ai-coding-agents/)
 - [goose blog: Intro to ACP](https://block.github.io/goose/blog/2025/10/24/intro-to-agent-client-protocol-acp/)
-- [JetBrains ACP Agent Registry 发布博客](https://blog.jetbrains.com/ai/2026/01/acp-agent-registry/)
+- [JetBrains ACP Agent Registry launch blog](https://blog.jetbrains.com/ai/2026/01/acp-agent-registry/)
 - [AI SDK ACP Community Provider](https://ai-sdk.dev/providers/community-providers/acp)
 
-### 已知问题
-- [Issue #28786: PTY 崩溃问题](https://github.com/openclaw/openclaw/issues/28786)
-- [Issue #29195: Codex 静默权限失败](https://github.com/openclaw/openclaw/issues/29195)
+### Known Issues
+- [Issue #28786: PTY crash issue](https://github.com/openclaw/openclaw/issues/28786)
+- [Issue #29195: Codex silent permission failure](https://github.com/openclaw/openclaw/issues/29195)
 
-### 本项目相关
+### This Project
 - [tcd PRD](../prd.md)
-- [tcd 设计文档](../design.md)
-- [对比报告: CCB vs codex-orchestrator](comparison-ccb-vs-codex-orchestrator.md)
+- [tcd design document](../design.md)

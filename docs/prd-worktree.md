@@ -1,42 +1,42 @@
-# PRD: tcd Git Worktree 支持
+# PRD: tcd Git Worktree Support
 
-**版本**: v0.3.0
-**日期**: 2026-03-05
-**状态**: IMPLEMENTED
-**前置**: v0.2.0（事件日志 + 诊断系统已完成，191 tests pass）
-**完成日期**: 2026-03-05（222 tests pass）
-
----
-
-## 1. 问题
-
-在闭环生态系统的模式 D（并行 Codex + Worktree）中，需要多个 Codex 实例在同一项目上并行工作。当前 tcd 支持多并发 job（各自独立 tmux session），但缺少 git worktree 生命周期管理，调用方需要手动：
-
-1. `git worktree add` 创建隔离工作目录
-2. 把 worktree 路径传给 `tcd start -d`
-3. Job 完成后手动 `git merge` + `git worktree remove`
-
-这些操作是机械的、易出错的，且没有与 job 生命周期绑定。
-
-**核心需求**：tcd 提供 worktree 原语（创建/清理/合并），调用方决定何时使用。
+**Version**: v0.3.0
+**Date**: 2026-03-05
+**Status**: IMPLEMENTED
+**Prerequisite**: v0.2.0 (event log + diagnostics system complete, 191 tests pass)
+**Completion date**: 2026-03-05 (222 tests pass)
 
 ---
 
-## 2. 设计原则
+## 1. Problem
 
-- **tcd 提供工具，不提供策略** — 不在 tcd 内判断"该不该用 worktree"
-- **worktree=False 是默认值** — 不影响现有用法，完全透明
-- **非 git 项目直接报错** — 简单明确，不做 fallback
-- **Job 生命周期绑定** — kill/clean 时自动清理 worktree
-- **合并是显式操作** — 不自动 merge，调用方决定时机和策略
+In Mode D (parallel Codex + Worktree) of the closed-loop ecosystem, multiple Codex instances need to work on the same project in parallel. tcd currently supports multiple concurrent jobs (each in its own independent tmux session), but lacks git worktree lifecycle management. Callers must manually:
+
+1. `git worktree add` to create an isolated working directory
+2. Pass the worktree path to `tcd start -d`
+3. Manually `git merge` + `git worktree remove` after the job completes
+
+These steps are mechanical, error-prone, and not bound to the job lifecycle.
+
+**Core requirement**: tcd provides worktree primitives (create/cleanup/merge); callers decide when to use them.
 
 ---
 
-## 3. 方案
+## 2. Design Principles
 
-### 3.1 新增 `src/tcd/worktree.py` — Git Worktree 原语
+- **tcd provides tools, not policy** — tcd does not decide "whether to use worktrees"
+- **worktree=False is the default** — existing usage is unaffected, fully transparent
+- **Non-git projects fail immediately** — simple and explicit, no fallback
+- **Job lifecycle binding** — worktrees are automatically cleaned up on kill/clean
+- **Merge is an explicit operation** — no automatic merge; callers decide timing and strategy
 
-纯 git 操作封装，不依赖 tcd 其他模块：
+---
+
+## 3. Design
+
+### 3.1 New `src/tcd/worktree.py` — Git Worktree Primitives
+
+Pure git operation wrapper; no dependency on other tcd modules:
 
 ```python
 """Git worktree primitives for parallel job isolation."""
@@ -134,9 +134,9 @@ def delete_branch(repo_path: str | Path, branch: str) -> None:
     )
 ```
 
-### 3.2 扩展 Job 数据结构
+### 3.2 Extend Job Data Structure
 
-在 `Job` dataclass 中新增两个可选字段：
+Add two optional fields to the `Job` dataclass:
 
 ```python
 @dataclass
@@ -146,11 +146,11 @@ class Job:
     worktree_branch: str | None = None
 ```
 
-这两个字段在 `from_dict()` 中已自动兼容（未知 key 被过滤，缺失 key 用默认值）。
+These two fields are automatically compatible in `from_dict()` (unknown keys are filtered out; missing keys use default values).
 
-### 3.3 SDK 集成
+### 3.3 SDK Integration
 
-#### `start()` 增加 `worktree` 参数
+#### `start()` adds `worktree` parameter
 
 ```python
 def start(
@@ -162,19 +162,19 @@ def start(
     model: str | None = None,
     timeout: int = 60,
     sandbox: str | None = None,
-    worktree: bool = False,       # 新增
-    worktree_name: str | None = None,  # 新增，默认用 job_id
+    worktree: bool = False,       # new
+    worktree_name: str | None = None,  # new, defaults to job_id
 ) -> Job:
 ```
 
-当 `worktree=True` 时：
-1. 检查 `cwd` 是否是 git repo（否则 raise `TCDError`）
-2. 检查是否有未提交改动（`git status --porcelain`），有则 raise
-3. `create_worktree(cwd, name)` → 得到 worktree 路径
-4. 把 `cwd` 替换为 worktree 路径
-5. 在 Job 中记录 `worktree_path` 和 `worktree_branch`
+When `worktree=True`:
+1. Check whether `cwd` is a git repo (raise `TCDError` if not)
+2. Check for uncommitted changes (`git status --porcelain`); raise if present
+3. `create_worktree(cwd, name)` → get the worktree path
+4. Replace `cwd` with the worktree path
+5. Record `worktree_path` and `worktree_branch` in the Job
 
-#### `kill()` / `clean()` 自动清理
+#### `kill()` / `clean()` automatic cleanup
 
 ```python
 def kill(self, job_id: str) -> None:
@@ -186,7 +186,7 @@ def kill(self, job_id: str) -> None:
             pass  # best-effort cleanup
 ```
 
-#### 新增 `merge_worktree()`
+#### New `merge_worktree()`
 
 ```python
 def merge_worktree(
@@ -218,130 +218,130 @@ def merge_worktree(
     return success
 ```
 
-### 3.4 CLI 集成
+### 3.4 CLI Integration
 
-#### `tcd start` 新增 `--worktree` flag
+#### `tcd start` adds `--worktree` flag
 
 ```bash
-# 在 worktree 中启动 Codex
-tcd start -p codex --worktree -m "实现用户认证" -d /path/to/project
+# Start Codex in a worktree
+tcd start -p codex --worktree -m "Implement user authentication" -d /path/to/project
 
-# 自定义 worktree 名称
-tcd start -p codex --worktree --wt-name auth -m "实现用户认证" -d /path/to/project
+# Custom worktree name
+tcd start -p codex --worktree --wt-name auth -m "Implement user authentication" -d /path/to/project
 ```
 
-#### 新增 `tcd merge` 命令
+#### New `tcd merge` command
 
 ```bash
-# 合并 worktree 分支回主分支
+# Merge worktree branch back to main branch
 tcd merge <job_id>
 
-# squash merge
+# Squash merge
 tcd merge <job_id> --squash
 
-# 仅合并不清理
+# Merge without cleanup
 tcd merge <job_id> --no-cleanup
 ```
 
-### 3.5 事件日志集成
+### 3.5 Event Log Integration
 
-新增事件类型：
+New event types:
 
-| 事件 | 触发点 | 关键字段 |
+| Event | Trigger | Key Fields |
 |------|--------|---------|
-| `job.worktree_created` | worktree 创建成功 | worktree_path, branch |
-| `job.worktree_merged` | merge 操作完成 | success, strategy |
-| `job.worktree_removed` | worktree 清理完成 | worktree_path |
+| `job.worktree_created` | worktree successfully created | worktree_path, branch |
+| `job.worktree_merged` | merge operation complete | success, strategy |
+| `job.worktree_removed` | worktree cleanup complete | worktree_path |
 
 ---
 
-## 4. 实施计划
+## 4. Implementation Plan
 
-### Phase 1: Worktree 原语
+### Phase 1: Worktree Primitives
 
-- [ ] 新增 `src/tcd/worktree.py`（~80 行）
-- [ ] 函数：`is_git_repo`, `get_repo_root`, `create_worktree`, `remove_worktree`, `merge_branch`, `delete_branch`
-- [ ] 新增 `tests/test_worktree.py`（需要真实 git repo，类似 test_tmux_adapter.py 的集成测试风格）
+- [ ] Add `src/tcd/worktree.py` (~80 lines)
+- [ ] Functions: `is_git_repo`, `get_repo_root`, `create_worktree`, `remove_worktree`, `merge_branch`, `delete_branch`
+- [ ] Add `tests/test_worktree.py` (requires a real git repo; integration test style similar to test_tmux_adapter.py)
 
-### Phase 2: Job + SDK 集成
+### Phase 2: Job + SDK Integration
 
-- [ ] `Job` dataclass 加 `worktree_path`, `worktree_branch` 字段
-- [ ] `sdk.py` 的 `start()` 加 `worktree` / `worktree_name` 参数
-- [ ] `sdk.py` 新增 `merge_worktree()` 方法
-- [ ] `kill()` / `clean()` 中自动清理 worktree
-- [ ] 事件日志埋点（3 个事件）
-- [ ] 新增 `tests/test_worktree_sdk.py`（mock git 操作的单元测试）
+- [ ] Add `worktree_path`, `worktree_branch` fields to `Job` dataclass
+- [ ] Add `worktree` / `worktree_name` parameters to `sdk.py` `start()`
+- [ ] Add `merge_worktree()` method to `sdk.py`
+- [ ] Automatic worktree cleanup in `kill()` / `clean()`
+- [ ] Event log instrumentation (3 events)
+- [ ] Add `tests/test_worktree_sdk.py` (unit tests that mock git operations)
 
-### Phase 3: CLI 集成
+### Phase 3: CLI Integration
 
-- [ ] `tcd start` 加 `--worktree` / `--wt-name` 选项
-- [ ] 新增 `tcd merge` 命令
-- [ ] 测试：CLI 参数解析
+- [ ] Add `--worktree` / `--wt-name` options to `tcd start`
+- [ ] Add `tcd merge` command
+- [ ] Tests: CLI argument parsing
 
 ---
 
-## 5. 影响范围
+## 5. Impact Scope
 
-| 文件 | 改动类型 |
+| File | Change Type |
 |------|---------|
-| `src/tcd/worktree.py` | **新增** |
-| `src/tcd/job.py` | 加 2 个字段 |
-| `src/tcd/sdk.py` | `start()` 扩展 + `merge_worktree()` |
-| `src/tcd/cli.py` | `--worktree` flag + `tcd merge` 命令 |
-| `tests/test_worktree.py` | **新增**（集成测试） |
-| `tests/test_worktree_sdk.py` | **新增**（单元测试） |
+| `src/tcd/worktree.py` | **New** |
+| `src/tcd/job.py` | Add 2 fields |
+| `src/tcd/sdk.py` | Extend `start()` + `merge_worktree()` |
+| `src/tcd/cli.py` | `--worktree` flag + `tcd merge` command |
+| `tests/test_worktree.py` | **New** (integration tests) |
+| `tests/test_worktree_sdk.py` | **New** (unit tests) |
 
-**不改动**：provider 代码、tmux_adapter、collector、event_log、diagnostics
-
----
-
-## 6. 非目标
-
-- 不在 tcd 内判断"该不该用 worktree" — 调用方决策
-- 不自动解决 merge 冲突 — 返回 False，调用方处理
-- 不支持 `git stash` 自动暂存 — 有未提交改动时直接报错
-- 不管理依赖安装（node_modules 等） — worktree 内的 install 由调用方/Codex 处理
-- 不做跨 worktree 的文件锁 — 通过任务拆分（不改同一文件）避免冲突
+**Not changed**: provider code, tmux_adapter, collector, event_log, diagnostics
 
 ---
 
-## 7. 调用方使用示例
+## 6. Non-Goals
 
-### SDK 并行 Codex
+- Do not decide "whether to use worktrees" inside tcd — caller's decision
+- Do not auto-resolve merge conflicts — return False, caller handles it
+- Do not support `git stash` auto-stashing — error immediately when there are uncommitted changes
+- Do not manage dependency installs (node_modules, etc.) — installation inside worktree is handled by caller/Codex
+- Do not implement cross-worktree file locking — avoid conflicts through task decomposition (avoid modifying the same file)
+
+---
+
+## 7. Caller Usage Examples
+
+### SDK Parallel Codex
 
 ```python
 from tcd import TCD
 
 tcd = TCD()
 
-# 并行启动 3 个 Codex，各在独立 worktree
+# Start 3 Codex jobs in parallel, each in its own worktree
 jobs = []
 for task in ["auth", "articles", "dashboard"]:
     job = tcd.start(
         "codex",
-        f"实现 {task} 模块，代码放在 src/features/{task}/",
+        f"Implement the {task} module; place code in src/features/{task}/",
         cwd="/path/to/project",
         worktree=True,
         worktree_name=task,
     )
     jobs.append(job)
 
-# 等待全部完成
+# Wait for all to complete
 for job in jobs:
     tcd.wait(job.id, timeout=600)
 
-# 逐个合并
+# Merge one by one
 for job in jobs:
     success = tcd.merge_worktree(job.id)
     if not success:
         print(f"Merge conflict on {job.worktree_branch}, manual resolution needed")
 ```
 
-### codex-worker Skill 集成
+### codex-worker Skill Integration
 
 ```
-调用方（Claude Code）判断：
-1. len(tasks) >= 2 且功能独立 → 建议并行 worktree
-2. 用户确认 → 创建 worktree + 并行 Codex
-3. 全部完成 → 逐个 merge + 集成验证
+Caller (Claude Code) decides:
+1. len(tasks) >= 2 and features are independent → suggest parallel worktrees
+2. User confirms → create worktrees + parallel Codex
+3. All complete → merge one by one + integration verification
 ```

@@ -1,29 +1,29 @@
-# tcd 集成指南
+# tcd Integration Guide
 
-tcd 提供两种使用姿势：**完整编排**（CLI/SDK）和**轻量驱动**（直接 import 底层模块）。按你的场景选择。
+tcd supports two usage modes: **full orchestration** (CLI/SDK) and **lightweight driving** (direct import of low-level modules). Choose based on your use case.
 
 ---
 
-## 场景 1：Claude Code 中使用
+## Scenario 1: Use Inside Claude Code
 
-通过 CLAUDE.md 配置 + bash 工具调用 tcd CLI。
+Configure via CLAUDE.md and invoke the tcd CLI through the bash tool.
 
-### 配置
+### Configuration
 
-在项目 CLAUDE.md 中添加：
+Add the following to your project's CLAUDE.md:
 
 ```markdown
-## tcd: AI 任务分派器
+## tcd: AI Task Dispatcher
 
-可用命令：
-- `tcd start -p <provider> -m "<prompt>" -d <cwd>` — 启动任务，返回 job_id
-- `tcd check <job_id>` — 非阻塞检查（exit 0=完成, 1=运行中）
-- `tcd wait <job_id> --timeout <秒>` — 阻塞等待完成
-- `tcd output <job_id>` — 获取结果
-- `tcd send <job_id> "<message>"` — 发送后续指令
-- `tcd jobs` — 列出所有任务
-- `tcd kill <job_id>` — 终止任务
-- `tcd clean` — 清理已完成任务
+Available commands:
+- `tcd start -p <provider> -m "<prompt>" -d <cwd>` — start a task, returns job_id
+- `tcd check <job_id>` — non-blocking check (exit 0=done, 1=running)
+- `tcd wait <job_id> --timeout <seconds>` — blocking wait for completion
+- `tcd output <job_id>` — retrieve results
+- `tcd send <job_id> "<message>"` — send a follow-up instruction
+- `tcd jobs` — list all tasks
+- `tcd kill <job_id>` — terminate a task
+- `tcd clean` — clean up completed tasks
 
 Provider: codex / claude / gemini
 ```
@@ -83,31 +83,31 @@ tcd merge <job_id_api>  # --squash for single commit
 
 ---
 
-## 场景 2：OpenClaw 插件
+## Scenario 2: OpenClaw Plugin
 
-OpenClaw 是 TypeScript 项目，通过 `child_process` 调用 tcd CLI（JSON 输出）。
+OpenClaw is a TypeScript project that calls the tcd CLI (JSON output) via `child_process`.
 
-### 调用方式
+### Invocation Pattern
 
 ```typescript
 import { execSync } from "child_process";
 
-// 启动任务
+// Start a task
 const startResult = JSON.parse(
   execSync(`tcd start -p codex -m "Fix the bug" -d /project --json`).toString()
 );
 const jobId = startResult.id;
 
-// 检查完成
+// Check completion
 const status = JSON.parse(
   execSync(`tcd status ${jobId} --json`).toString()
 );
 
-// 获取输出
+// Get output
 const output = execSync(`tcd output ${jobId}`).toString();
 ```
 
-### OpenClaw Tool 定义模板
+### OpenClaw Tool Definition Template
 
 ```typescript
 import { Type } from "@sinclair/typebox";
@@ -141,25 +141,25 @@ export function createTcdTool(): AnyAgentTool {
 
 ---
 
-## 场景 3：Nanobot / Python 编排
+## Scenario 3: Nanobot / Python Orchestration
 
-直接 import Python SDK 或底层模块。
+Import the Python SDK or low-level modules directly.
 
-### 方式 A：完整 SDK（推荐）
+### Method A: Full SDK (recommended)
 
 ```python
 from tcd import TCD
 
 tcd = TCD()
-job = tcd.start("codex", "实现 CRUD API", cwd="/project")
+job = tcd.start("codex", "Implement CRUD API", cwd="/project")
 result = tcd.wait(job.id, timeout=300)
 output = tcd.output(job.id)
 tcd.clean()
 ```
 
-### 方式 B：轻量驱动（只用 tmux 交互层）
+### Method B: Lightweight Driving (tmux interaction layer only)
 
-不走 Job 管理和 Provider 注册表，直接操作 tmux session：
+Bypasses Job management and Provider registry; operates tmux sessions directly:
 
 ```python
 from tcd.tmux_adapter import TmuxAdapter, CaptureDepth
@@ -167,28 +167,28 @@ from tcd.output_cleaner import clean_output, extract_json_payloads
 
 adapter = TmuxAdapter()
 
-# 创建 session
+# Create a session
 adapter.create_session(
     name="my-codex-job",
     cmd="codex -a never --prompt 'Fix the login bug'",
     cwd="/path/to/project",
 )
 
-# 发送文本（自动选择 send-keys 或 load-buffer）
+# Send text (automatically selects send-keys or load-buffer)
 adapter.send_text("my-codex-job", "Add unit tests")
 
-# 捕获输出（语义深度）
+# Capture output (semantic depth)
 raw = adapter.capture_pane("my-codex-job", depth=CaptureDepth.CONTEXT)
 clean = clean_output(raw)
 
-# 提取 JSON（4 层策略）
+# Extract JSON (4-layer strategy)
 payloads = extract_json_payloads(raw)
 
-# 清理
+# Cleanup
 adapter.kill_session("my-codex-job")
 ```
 
-### 方式 C：Nanobot Tool Adapter 模板
+### Method C: Nanobot Tool Adapter Template
 
 ```python
 from tcd import TCD
@@ -218,19 +218,19 @@ class CodexTmuxTool:
 
 ---
 
-## 场景 4：Shell 脚本批量编排
+## Scenario 4: Shell Script Batch Orchestration
 
-### 并行批量
+### Parallel Batch
 
 ```bash
 #!/bin/bash
 JOBS=()
-for task in "写 fibonacci" "写 HTTP server" "写 CLI parser"; do
+for task in "write fibonacci" "write HTTP server" "write CLI parser"; do
     JOB_ID=$(tcd start -p codex -m "$task" -d /tmp/batch | grep "Job started:" | awk '{print $NF}')
     JOBS+=("$JOB_ID")
 done
 
-# 等待全部完成
+# Wait for all to complete
 for job_id in "${JOBS[@]}"; do
     tcd wait "$job_id" --timeout 300
     echo "=== $job_id ==="
@@ -240,18 +240,18 @@ done
 tcd clean
 ```
 
-### 串行流水线
+### Serial Pipeline
 
 ```bash
 #!/bin/bash
-# Codex 写代码 → Claude 审查 → Gemini 写测试
-IMPL=$(tcd start -p codex -m "实现日期处理库" -d /project | awk '/Job started:/{print $NF}')
+# Codex writes code → Claude reviews → Gemini writes tests
+IMPL=$(tcd start -p codex -m "Implement a date handling library" -d /project | awk '/Job started:/{print $NF}')
 tcd wait "$IMPL"
 
-REVIEW=$(tcd start -p claude -m "审查 src/date-utils.ts" -d /project | awk '/Job started:/{print $NF}')
+REVIEW=$(tcd start -p claude -m "Review src/date-utils.ts" -d /project | awk '/Job started:/{print $NF}')
 tcd wait "$REVIEW"
 
-TEST=$(tcd start -p gemini -m "为 date-utils 写测试" -d /project | awk '/Job started:/{print $NF}')
+TEST=$(tcd start -p gemini -m "Write tests for date-utils" -d /project | awk '/Job started:/{print $NF}')
 tcd wait "$TEST"
 
 tcd clean
@@ -259,19 +259,19 @@ tcd clean
 
 ---
 
-## 场景 5：结构化 Codex 输出
+## Scenario 5: Structured Codex Output
 
-需要提取 Codex 的 thread ID、修改的文件列表、token 用量时：
+When you need to extract the Codex thread ID, list of modified files, or token usage:
 
 ```python
 from tcd import TCD
 from tcd.providers.codex import CodexProvider
 
 tcd = TCD()
-job = tcd.start("codex", "重构 auth 模块", cwd="/project")
+job = tcd.start("codex", "Refactor the auth module", cwd="/project")
 tcd.wait(job.id)
 
-# 结构化解析
+# Structured parsing
 provider = CodexProvider()
 result = provider.parse_response_structured(job)
 if result:
@@ -283,45 +283,45 @@ if result:
 
 ---
 
-## API 速查
+## API Reference
 
-### 完整 SDK (`from tcd import TCD`)
+### Full SDK (`from tcd import TCD`)
 
-| 方法 | 返回值 | 说明 |
+| Method | Returns | Description |
 |------|--------|------|
-| `start(provider, prompt, cwd, model, timeout)` | `Job` | 启动任务 |
-| `check(job_id)` | `CheckResult` | 非阻塞状态检查 |
-| `wait(job_id, timeout)` | `CheckResult` | 阻塞等待 |
-| `output(job_id)` | `str \| None` | 获取清洗后输出 |
-| `send(job_id, message)` | `bool` | 发送后续指令 |
-| `status(job_id)` | `Job` | 获取 Job 完整状态 |
-| `jobs(status)` | `list[Job]` | 列出任务 |
-| `kill(job_id)` | `bool` | 终止任务 |
-| `clean()` | `int` | 清理已完成任务 |
+| `start(provider, prompt, cwd, model, timeout)` | `Job` | Start a task |
+| `check(job_id)` | `CheckResult` | Non-blocking status check |
+| `wait(job_id, timeout)` | `CheckResult` | Blocking wait |
+| `output(job_id)` | `str \| None` | Get cleaned output |
+| `send(job_id, message)` | `bool` | Send follow-up instruction |
+| `status(job_id)` | `Job` | Get full Job status |
+| `jobs(status)` | `list[Job]` | List tasks |
+| `kill(job_id)` | `bool` | Terminate a task |
+| `clean()` | `int` | Clean up completed tasks |
 
-### 底层模块（轻量 import）
+### Low-Level Modules (lightweight import)
 
-| 模块 | 核心函数/类 | 说明 |
+| Module | Core Function/Class | Description |
 |------|------------|------|
-| `tcd.tmux_adapter` | `TmuxAdapter` | tmux 操作原语 |
-| `tcd.tmux_adapter` | `CaptureDepth` | 语义捕获深度 |
-| `tcd.output_cleaner` | `clean_output()` | ANSI + TUI 噪声清洗 |
-| `tcd.output_cleaner` | `strip_ansi()` | 仅清洗 ANSI |
-| `tcd.output_cleaner` | `extract_json_payloads()` | 4 层 JSON 提取 |
-| `tcd.providers.codex` | `CodexOutput` | 结构化 Codex 输出 |
-| `tcd.providers.codex` | `parse_codex_ndjson()` | 解析 Codex NDJSON |
+| `tcd.tmux_adapter` | `TmuxAdapter` | tmux operation primitives |
+| `tcd.tmux_adapter` | `CaptureDepth` | Semantic capture depth |
+| `tcd.output_cleaner` | `clean_output()` | ANSI + TUI noise cleaning |
+| `tcd.output_cleaner` | `strip_ansi()` | ANSI-only cleaning |
+| `tcd.output_cleaner` | `extract_json_payloads()` | 4-layer JSON extraction |
+| `tcd.providers.codex` | `CodexOutput` | Structured Codex output |
+| `tcd.providers.codex` | `parse_codex_ndjson()` | Parse Codex NDJSON |
 
-### CLI 命令
+### CLI Commands
 
-| 命令 | 说明 |
+| Command | Description |
 |------|------|
-| `tcd start -p <provider> -m <prompt>` | 启动任务 |
-| `tcd check <id>` | 非阻塞检查 (exit: 0/1/2/3) |
-| `tcd wait <id> [--timeout N]` | 阻塞等待 |
-| `tcd output <id> [--full] [--raw]` | 获取输出 |
-| `tcd send <id> <message>` | 发送后续指令 |
-| `tcd status <id> [--json]` | 查看状态 |
-| `tcd jobs [--status S] [--json]` | 列出任务 |
-| `tcd attach <id>` | 连接 tmux session |
-| `tcd kill <id> [--all]` | 终止任务 |
-| `tcd clean [--all] [--before 7d]` | 清理 |
+| `tcd start -p <provider> -m <prompt>` | Start a task |
+| `tcd check <id>` | Non-blocking check (exit: 0/1/2/3) |
+| `tcd wait <id> [--timeout N]` | Blocking wait |
+| `tcd output <id> [--full] [--raw]` | Get output |
+| `tcd send <id> <message>` | Send follow-up instruction |
+| `tcd status <id> [--json]` | View status |
+| `tcd jobs [--status S] [--json]` | List tasks |
+| `tcd attach <id>` | Connect to tmux session |
+| `tcd kill <id> [--all]` | Terminate a task |
+| `tcd clean [--all] [--before 7d]` | Cleanup |

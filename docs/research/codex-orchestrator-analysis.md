@@ -1,66 +1,66 @@
-# 调研报告: kingbootoshi/codex-orchestrator 源码架构分析
+# Research Report: kingbootoshi/codex-orchestrator — Source Architecture Analysis
 
-**日期**: 2026-03-02
-**来源**: https://github.com/kingbootoshi/codex-orchestrator
-**任务**: 深度分析 codex-orchestrator 如何通过 tmux 驱动 Codex CLI、解析输出、分发任务和收集结果
-
----
-
-## 调研摘要
-
-codex-orchestrator 是一个 TypeScript/Bun 项目，通过 tmux 会话以交互模式启动 Codex CLI（TUI），用 `send-keys` 注入提示词，用 `script` 命令持久化日志，通过 notify-hook 机制感知 agent turn 完成，通过 `capture-pane` 轮询状态。整体架构简洁，约 6 个核心模块，约 1500 行代码，是一个成熟可借鉴的参考实现。
+**Date**: 2026-03-02
+**Source**: https://github.com/kingbootoshi/codex-orchestrator
+**Objective**: Deep-dive into how codex-orchestrator drives the Codex CLI via tmux, parses output, distributes tasks, and collects results
 
 ---
 
-## 项目概况
+## Research Summary
 
-| 属性 | 值 |
-|------|-----|
-| 运行时 | Bun（TypeScript，不编译直接运行） |
-| 依赖 | tmux, Codex CLI (`codex`), Bun, OpenAI API Key |
-| 唯一生产依赖 | `glob@^10` |
-| 默认模型 | `gpt-5.3-codex`（fast: `gpt-5.3-codex-spark`） |
-| 默认 reasoning | `xhigh` |
-| Job 存储 | `~/.codex-agent/jobs/` |
-| tmux 前缀 | `codex-agent-{jobId}` |
+codex-orchestrator is a TypeScript/Bun project that launches the Codex CLI (TUI) in interactive mode via a tmux session, injects prompts via `send-keys`, persists logs via the `script` command, detects agent turn completion via a notify-hook mechanism, and polls status via `capture-pane`. The overall architecture is clean — approximately 6 core modules and ~1,500 lines of code — and is a mature, reference-worthy implementation.
 
 ---
 
-## 文件结构
+## Project Overview
+
+| Attribute | Value |
+|-----------|-------|
+| Runtime | Bun (TypeScript, runs directly without compilation) |
+| Dependencies | tmux, Codex CLI (`codex`), Bun, OpenAI API Key |
+| Single production dependency | `glob@^10` |
+| Default model | `gpt-5.3-codex` (fast: `gpt-5.3-codex-spark`) |
+| Default reasoning | `xhigh` |
+| Job storage | `~/.codex-agent/jobs/` |
+| tmux prefix | `codex-agent-{jobId}` |
+
+---
+
+## File Structure
 
 ```
 src/
-  config.ts          - 全局配置（模型、路径、超时）
-  tmux.ts            - tmux 操作原语（create/send/capture/kill）
-  jobs.ts            - Job 生命周期管理
-  watcher.ts         - turn-complete 信号文件机制
-  notify-hook.ts     - Codex notify 回调脚本（agent turn 结束时触发）
-  session-parser.ts  - 解析 ~/.codex/sessions/ 的 JSONL/JSON 会话文件
-  output-cleaner.ts  - 清理 ANSI 和 TUI 噪音
-  cli.ts             - CLI 入口（start/status/send/capture/jobs/watch/attach）
+  config.ts          - Global config (model, paths, timeouts)
+  tmux.ts            - tmux operation primitives (create/send/capture/kill)
+  jobs.ts            - Job lifecycle management
+  watcher.ts         - turn-complete signal file mechanism
+  notify-hook.ts     - Codex notify callback script (triggered when agent turn ends)
+  session-parser.ts  - Parses JSONL/JSON session files under ~/.codex/sessions/
+  output-cleaner.ts  - Cleans ANSI and TUI noise
+  cli.ts             - CLI entry point (start/status/send/capture/jobs/watch/attach)
 bin/
-  codex-agent        - 主可执行文件
-  codex-bg           - Bash 封装，后台运行 + 轮询完成
+  codex-agent        - Main executable
+  codex-bg           - Bash wrapper, runs in background + polls for completion
 plugins/
-  codex-orchestrator/skills/codex-orchestrator/SKILL.md  - Claude 技能描述
+  codex-orchestrator/skills/codex-orchestrator/SKILL.md  - Claude skill description
 ```
 
 ---
 
-## 核心机制 1：tmux 驱动 Codex CLI
+## Core Mechanism 1: Driving Codex CLI via tmux
 
-### 会话创建（`tmux.ts: createSession`）
+### Session Creation (`tmux.ts: createSession`)
 
-**完整流程**：
+**Full flow**:
 
 ```typescript
-// 1. 把长提示写入文件，避免 shell 转义问题
+// 1. Write long prompts to a file to avoid shell escaping issues
 fs.writeFileSync(promptFile, options.prompt);
 
-// 2. 构建 codex 命令行，关键参数：
-//    -a never     : 自动批准（无需人工确认文件操作）
-//    -s sandbox   : 沙箱模式（read-only / workspace-write / danger-full-access）
-//    notify hook  : 通知脚本，agent 每完成一个 turn 触发
+// 2. Build the codex command line; key arguments:
+//    -a never     : auto-approve (no manual confirmation for file operations)
+//    -s sandbox   : sandbox mode (read-only / workspace-write / danger-full-access)
+//    notify hook  : notification script, triggered when agent completes each turn
 const codexArgs = [
   `-c`, `model="${options.model}"`,
   `-c`, `model_reasoning_effort="${options.reasoningEffort}"`,
@@ -70,30 +70,30 @@ const codexArgs = [
   `-s`, options.sandbox,
 ].join(" ");
 
-// 3. 用 script 命令记录全部终端输出到 .log 文件
-//    会话结束后打印 "[codex-agent: Session complete...]"，read 防止会话立即退出
+// 3. Use the script command to record all terminal output to a .log file
+//    After the session ends, prints "[codex-agent: Session complete...]"; read prevents the session from immediately exiting
 const shellCmd = `script -q "${logFile}" codex ${codexArgs}; echo "\\n\\n[codex-agent: Session complete. Press Enter to close.]"; read`;
 
-// 4. 创建 detached tmux 会话
+// 4. Create a detached tmux session
 execSync(`tmux new-session -d -s "${sessionName}" -c "${options.cwd}" '${shellCmd}'`);
 
-// 5. 等待 Codex TUI 初始化（1秒）
+// 5. Wait for Codex TUI to initialize (1 second)
 spawnSync("sleep", ["1"]);
 
-// 6. 跳过更新提示（发送 "3" + Enter）
+// 6. Skip the update prompt (send "3" + Enter)
 execSync(`tmux send-keys -t "${sessionName}" "3"`);
 spawnSync("sleep", ["0.5"]);
 execSync(`tmux send-keys -t "${sessionName}" Enter`);
 spawnSync("sleep", ["1"]);
 
-// 7. 注入提示词
+// 7. Inject the prompt
 if (options.prompt.length < 5000) {
-  // 短提示：直接 send-keys
+  // Short prompt: send-keys directly
   execSync(`tmux send-keys -t "${sessionName}" '${escapedPrompt}'`);
-  spawnSync("sleep", ["0.3"]);  // 等待 TUI 处理文本
+  spawnSync("sleep", ["0.3"]);  // Wait for TUI to process text
   execSync(`tmux send-keys -t "${sessionName}" Enter`);
 } else {
-  // 长提示（≥5000字符）：tmux buffer paste
+  // Long prompt (>=5000 chars): tmux buffer paste
   execSync(`tmux load-buffer "${promptFile}"`);
   execSync(`tmux paste-buffer -t "${sessionName}"`);
   spawnSync("sleep", ["0.3"]);
@@ -101,95 +101,95 @@ if (options.prompt.length < 5000) {
 }
 ```
 
-**关键设计决策**：
-- 使用 `script -q` 记录日志，即使 tmux 会话被 kill 后日志依然保留
-- 用 `read` 命令让 shell 等待，防止会话在 codex 退出后立即关闭（便于 capture-pane 读最终输出）
-- 短提示用 `send-keys`，长提示（≥5000字符）用 `load-buffer` + `paste-buffer`，解决命令行长度限制
-- 单引号转义：`message.replace(/'/g, "'\\''")`
+**Key design decisions**:
+- Uses `script -q` to record logs; logs are preserved even after the tmux session is killed
+- Uses `read` to keep the shell waiting, preventing the session from immediately closing after codex exits (allows capture-pane to read final output)
+- Short prompts use `send-keys`; long prompts (>=5000 chars) use `load-buffer` + `paste-buffer`, resolving command-line length limits
+- Single-quote escaping: `message.replace(/'/g, "'\\''")`
 
-### 向运行中会话发送消息（`sendMessage`）
+### Sending Messages to a Running Session (`sendMessage`)
 
 ```typescript
 const escapedMessage = message.replace(/'/g, "'\\''");
 execSync(`tmux send-keys -t "${sessionName}" '${escapedMessage}'`);
-spawnSync("sleep", ["0.3"]);  // 等待 TUI 处理
+spawnSync("sleep", ["0.3"]);  // Wait for TUI to process
 execSync(`tmux send-keys -t "${sessionName}" Enter`);
 ```
 
 ---
 
-## 核心机制 2：Codex TUI 输出解析
+## Core Mechanism 2: Parsing Codex TUI Output
 
-### 策略 1：`capture-pane`（实时状态检测）
+### Strategy 1: `capture-pane` (Real-Time Status Detection)
 
 ```typescript
-// 读取最近 N 行（适合状态检测）
+// Read the last N lines (suitable for status detection)
 execSync(`tmux capture-pane -t "${sessionName}" -p`);
 
-// 读取完整 scrollback（-S - 表示从历史开始）
+// Read the full scrollback (-S - means start from history)
 execSync(`tmux capture-pane -t "${sessionName}" -p -S -`, { maxBuffer: 50 * 1024 * 1024 });
 ```
 
-**完成检测**：检查 capture-pane 输出中是否包含 `"[codex-agent: Session complete"` 字符串（由 shell 在 codex 退出后 echo 打印）。
+**Completion detection**: Checks whether the capture-pane output contains the string `"[codex-agent: Session complete"` (echoed by the shell after codex exits).
 
-### 策略 2：`script` 日志文件（持久化后备）
+### Strategy 2: `script` Log File (Persistent Fallback)
 
-- 路径：`~/.codex-agent/jobs/{jobId}.log`
-- 优先用 tmux capture，session 不存在时 fallback 到读日志文件
-- 可用于解析 session ID（`extractSessionId(logContent)`）
+- Path: `~/.codex-agent/jobs/{jobId}.log`
+- Prefer tmux capture; fall back to reading the log file when the session no longer exists
+- Can be used to extract the session ID (`extractSessionId(logContent)`)
 
-### 策略 3：Codex 原生会话文件（结构化数据）
+### Strategy 3: Codex Native Session Files (Structured Data)
 
-Codex 会在 `~/.codex/sessions/` 存储 JSONL/JSON 会话文件，包含 token 用量、文件修改列表、摘要等。
+Codex stores JSONL/JSON session files under `~/.codex/sessions/`, containing token usage, modified file lists, summaries, etc.
 
 ```typescript
-// session-parser.ts 解析流程：
-// 1. 从 .log 文件提取 session ID（正则匹配 "session id: xxx"）
-const sessionId = extractSessionId(logContent);  // 正则 /session id:\s*([0-9a-f-]{8,})/i
+// session-parser.ts parsing flow:
+// 1. Extract session ID from the .log file (regex match "session id: xxx")
+const sessionId = extractSessionId(logContent);  // regex /session id:\s*([0-9a-f-]{8,})/i
 
-// 2. 在 ~/.codex/sessions/ 目录树中找到对应的 .jsonl 或 .json 文件
+// 2. Locate the corresponding .jsonl or .json file in the ~/.codex/sessions/ directory tree
 const sessionFile = findSessionFile(sessionId);
 
-// 3. 解析获取结构化数据
+// 3. Parse for structured data
 const data = parseSessionFile(sessionFile);
 // data = { tokens: {input, output, context_window, context_used_pct}, files_modified: [...], summary: "..." }
 ```
 
-JSONL 格式解析关键逻辑：
-- `event_msg + token_count` → 解析 token 用量
-- `event_msg + agent_message` → 提取摘要
-- `response_item + apply_patch tool call` → 提取修改的文件路径
+Key logic for JSONL format parsing:
+- `event_msg + token_count` → parse token usage
+- `event_msg + agent_message` → extract summary
+- `response_item + apply_patch tool call` → extract modified file paths
 
-### ANSI 清理（`output-cleaner.ts`）
+### ANSI Cleaning (`output-cleaner.ts`)
 
-大量正则处理 TUI 终端输出噪音，包括：
-- ANSI CSI/OSC/DCS/ESC 序列清除
-- Codex Chrome TUI 特有的噪音行（`esc to interrupt`, `% context left`, `background terminal running` 等）
-- 重复行去重
-- URL 重绘 artifact 清理
-- "typing artifact" 检测（短单词重复序列 heuristic）
-- 重排输出为干净文本
+Extensive regex processing of TUI terminal output noise, including:
+- ANSI CSI/OSC/DCS/ESC sequence removal
+- Codex Chrome TUI-specific noise lines (`esc to interrupt`, `% context left`, `background terminal running`, etc.)
+- Duplicate line deduplication
+- URL redraw artifact cleanup
+- "Typing artifact" detection (short repeated word sequence heuristic)
+- Rearranges output into clean text
 
 ---
 
-## 核心机制 3：notify-hook（Turn 完成检测）
+## Core Mechanism 3: notify-hook (Turn Completion Detection)
 
-**最优雅的部分**。Codex 支持 `notify` 配置项，每个 agent turn 结束时执行指定命令，并传入 JSON payload。
+**The most elegant part.** Codex supports a `notify` config option that executes a specified command at the end of each agent turn, passing in a JSON payload.
 
-### 配置方式
+### Configuration
 
 ```typescript
-// 在 codex 命令行中配置
+// Configured on the codex command line
 `-c 'notify=["bun","run","${notifyHook}","${options.jobId}"]'`
 ```
 
-### notify-hook.ts 处理
+### notify-hook.ts Handler
 
 ```typescript
-// 接收 Codex 的 agent-turn-complete 事件
+// Receives Codex's agent-turn-complete event
 function main(): void {
   const jobId = process.argv[2];
-  const rawPayload = process.argv[3];   // Codex 传入的 JSON payload
+  const rawPayload = process.argv[3];   // JSON payload from Codex
 
   const payload = parsePayload(rawPayload);
   if (payload.type !== "agent-turn-complete") return;
@@ -200,142 +200,142 @@ function main(): void {
     timestamp: new Date().toISOString(),
   };
 
-  // 写入信号文件 ~/.codex-agent/jobs/{jobId}.turn-complete
+  // Write signal file ~/.codex-agent/jobs/{jobId}.turn-complete
   writeSignalFile(jobId, event);
-  // 更新 job.json 中的 turnCount, lastTurnCompletedAt, lastAgentMessage, turnState="idle"
+  // Update job.json: turnCount, lastTurnCompletedAt, lastAgentMessage, turnState="idle"
   updateJobTurn(jobId, event);
 }
 ```
 
-### 信号文件机制（`watcher.ts`）
+### Signal File Mechanism (`watcher.ts`)
 
 ```typescript
-// 信号文件路径
+// Signal file path
 const signalPath = `~/.codex-agent/jobs/${jobId}.turn-complete`;
 
-// 写入信号
-writeSignalFile(jobId, event);     // 创建 .turn-complete 文件
+// Write signal
+writeSignalFile(jobId, event);     // Create .turn-complete file
 
-// 检测是否 idle（Claude 轮询此文件）
-signalFileExists(jobId);           // 检查文件是否存在
+// Check if idle (Claude polls this file)
+signalFileExists(jobId);           // Check whether the file exists
 
-// 读取 turn 事件详情
-readSignalFile(jobId);             // 读取 JSON
+// Read turn event details
+readSignalFile(jobId);             // Read JSON
 
-// 清除信号（发送新消息时清除）
-clearSignalFile(jobId);            // 删除文件
+// Clear signal (cleared when sending a new message)
+clearSignalFile(jobId);            // Delete the file
 ```
 
-**核心优势**：Claude 不需要轮询 tmux pane，直接检测信号文件存在与否，低 CPU 消耗，高可靠性。
+**Key advantage**: Claude does not need to poll the tmux pane; it simply checks whether the signal file exists — low CPU usage, high reliability.
 
 ---
 
-## 核心机制 4：任务分发与结果收集架构
+## Core Mechanism 4: Task Distribution and Result Collection Architecture
 
-### Job 数据结构
+### Job Data Structure
 
 ```typescript
 interface Job {
-  id: string;                          // 4字节随机hex（如 "a3f2b1c9"）
+  id: string;                          // 4-byte random hex (e.g., "a3f2b1c9")
   status: "pending" | "running" | "completed" | "failed";
   prompt: string;
   model: string;
   reasoningEffort: "low" | "medium" | "high" | "xhigh";
   sandbox: "read-only" | "workspace-write" | "danger-full-access";
-  parentSessionId?: string;            // 多层级 agent 追踪
+  parentSessionId?: string;            // Multi-level agent tracking
   cwd: string;
-  createdAt: string;                   // ISO 时间戳
+  createdAt: string;                   // ISO timestamp
   startedAt?: string;
   completedAt?: string;
   tmuxSession?: string;                // "codex-agent-{jobId}"
-  result?: string;                     // 完整输出
+  result?: string;                     // Full output
   error?: string;
-  // Turn 状态追踪
+  // Turn state tracking
   turnCount?: number;
   lastTurnCompletedAt?: string;
-  lastAgentMessage?: string;           // 截断到 500 字符
+  lastAgentMessage?: string;           // Truncated to 500 characters
   turnState?: "working" | "idle" | "context_limit";
 }
 ```
 
-所有 Job 以 JSON 文件存储在 `~/.codex-agent/jobs/{jobId}.json`。
+All jobs are stored as JSON files at `~/.codex-agent/jobs/{jobId}.json`.
 
-### 任务生命周期
+### Task Lifecycle
 
 ```
 startJob()
-  → 生成 jobId (randomBytes(4).hex)
-  → 保存 job.json (status: "pending")
-  → createSession() 启动 tmux
-  → 更新 job.json (status: "running", tmuxSession)
+  → generate jobId (randomBytes(4).hex)
+  → save job.json (status: "pending")
+  → createSession() launches tmux
+  → update job.json (status: "running", tmuxSession)
 
-[Codex 执行中...]
-  → notify-hook 触发 → 写入 .turn-complete 信号文件
-  → 外部轮询 signalFileExists() 感知 turn 结束
+[Codex executing...]
+  → notify-hook fires → write .turn-complete signal file
+  → external poller checks signalFileExists() to detect turn end
 
-refreshJobStatus(jobId)  [轮询调用]
-  → sessionExists()? → 否 → status: "completed"
-  → capturePane(-20行) 含 "[codex-agent: Session complete"? → status: "completed"
-  → isInactiveTimedOut()? (60分钟无活动) → killSession() → status: "failed"
+refreshJobStatus(jobId)  [called by poller]
+  → sessionExists()? → no → status: "completed"
+  → capturePane(-20 lines) contains "[codex-agent: Session complete"? → status: "completed"
+  → isInactiveTimedOut()? (60 minutes no activity) → killSession() → status: "failed"
 
-getJobsJson()  [结构化输出]
-  → 对每个 completed job 调用 loadSessionData()
-  → 解析 ~/.codex/sessions/*.jsonl 获取 tokens + files_modified + summary
+getJobsJson()  [structured output]
+  → for each completed job, call loadSessionData()
+  → parse ~/.codex/sessions/*.jsonl for tokens + files_modified + summary
 ```
 
-### 超时机制
+### Timeout Mechanism
 
-- 以 `.log` 文件的 `mtime` 为最后活动时间（log 文件随 Codex 输出实时更新）
-- 若 `Date.now() - lastActivityMs > 60分钟`，kill session，标记为 failed
-- 没有 log 文件时 fallback 到 `job.startedAt`
+- Uses the `.log` file's `mtime` as the last activity timestamp (log file is updated in real time as Codex outputs)
+- If `Date.now() - lastActivityMs > 60 minutes`, kills session, marks as failed
+- Falls back to `job.startedAt` when the log file doesn't exist
 
-### 结果收集优先级
+### Result Collection Priority
 
 ```
 getJobOutput() / getJobFullOutput():
-1. 优先：tmux capture-pane（session 仍存在时）
-2. 后备：读取 ~/.codex-agent/jobs/{jobId}.log
+1. Preferred: tmux capture-pane (while session still exists)
+2. Fallback: read ~/.codex-agent/jobs/{jobId}.log
 
-getJobsJson() (结构化数据):
-1. 从 .log 提取 session ID
-2. 在 ~/.codex/sessions/ 找到 JSONL 文件
-3. 解析获取 tokens + files_modified + summary
+getJobsJson() (structured data):
+1. Extract session ID from .log
+2. Locate JSONL file in ~/.codex/sessions/
+3. Parse for tokens + files_modified + summary
 ```
 
 ---
 
-## 核心机制 5：错误处理与重试
+## Core Mechanism 5: Error Handling and Retry
 
-### 错误处理策略
+### Error Handling Strategy
 
-1. **tmux 操作包裹在 try/catch**：`createSession`、`sendMessage`、`capturePane` 等函数在失败时返回 `false`/`null` 而非抛出异常
-2. **session 不存在检查前置**：所有操作先调用 `sessionExists()` 验证
-3. **超时兜底**：60 分钟无活动自动 kill，标记 failed
-4. **auxiliaryFiles 清理**：`deleteJob()` 同时清理 `.prompt`、`.log`、`.turn-complete` 文件
+1. **tmux operations wrapped in try/catch**: `createSession`, `sendMessage`, `capturePane`, etc. return `false`/`null` on failure rather than throwing exceptions
+2. **Session existence check up front**: All operations first call `sessionExists()` to verify
+3. **Timeout fallback**: Automatically killed and marked failed after 60 minutes of inactivity
+4. **Auxiliary file cleanup**: `deleteJob()` also cleans up `.prompt`, `.log`, `.turn-complete` files
 
-### 上下文耗尽检测
+### Context Exhaustion Detection
 
-CLI 的 `await` 命令会检测 `turnState === "context_limit"` 状态，并以 exit code 2 退出，供上游 orchestrator 区分正常完成（0）和上下文耗尽（2）。
+The CLI's `await` command detects `turnState === "context_limit"` status and exits with code 2, allowing the upstream orchestrator to distinguish normal completion (0) from context exhaustion (2).
 
-### 重试机制
+### Retry Mechanism
 
-**原生无重试**。设计哲学是"不要杀死 agent 重新开始，而是用 `send` 命令发后续指令"。通过 `sendToJob()` / `codex-agent send {jobId} "消息"` 重定向运行中的 agent，而不是重启。
+**No native retry**. The design philosophy is "don't kill the agent and restart from scratch — use the `send` command to issue follow-up instructions." Redirect a running agent via `sendToJob()` / `codex-agent send {jobId} "message"` rather than restarting.
 
 ---
 
-## `codex-bg` 后台封装（Bash）
+## `codex-bg` Background Wrapper (Bash)
 
 ```bash
-# codex-bg 做了 cli.ts 没有直接提供的功能：
-# 1. 提取 job ID
+# codex-bg provides functionality that cli.ts doesn't directly offer:
+# 1. Extract job ID
 JOB_ID=$(codex-agent start ... | grep "Job ID:" | awk '{print $NF}')
 
-# 2. 轮询 turn 完成信号（检查 .turn-complete 文件）
+# 2. Poll turn completion signal (check .turn-complete file)
 if [ -f "$JOBS_DIR/$JOB_ID.turn-complete" ]; then
   export CODEX_AGENT_TURN_COMPLETE=1
 fi
 
-# 3. 轮询 job 状态直到完成
+# 3. Poll job status until complete
 while true; do
   STATUS=$(codex-agent status $JOB_ID --json | jq -r .status)
   if [ "$STATUS" = "completed" ] || [ "$STATUS" = "failed" ]; then
@@ -345,43 +345,43 @@ while true; do
   sleep $POLL_INTERVAL
 done
 
-# 4. 可选：完成后触发回调命令
+# 4. Optionally trigger a callback command after completion
 if [ -n "$NOTIFY_CMD" ]; then eval "$NOTIFY_CMD"; fi
 ```
 
 ---
 
-## 对我们项目的借鉴价值
+## Applicability to Our Project
 
-### 可直接移植的模式
+### Directly Portable Patterns
 
-| 模式 | 原始实现 | 我们可以... |
-|------|---------|------------|
-| tmux 驱动 Codex | `createSession()` in `tmux.ts` | 直接翻译为 Python subprocess |
-| 长提示 paste-buffer | `tmux load-buffer` + `paste-buffer` | 同样适用，5000字符阈值合理 |
-| notify-hook 信号文件 | `watcher.ts` + `notify-hook.ts` | 完全移植，无语言障碍 |
-| Session 完成标记 | `echo "[codex-agent: Session complete...]"` | 自定义 marker 策略 |
-| 超时检测 via log mtime | `getLastActivityMs()` | Python `os.stat().st_mtime` |
-| 输出 fallback 策略 | capture-pane → log file | 两级 fallback 必须实现 |
-| JSONL 会话解析 | `session-parser.ts` | 解析 `~/.codex/sessions/` 获取 tokens |
+| Pattern | Original Implementation | We can... |
+|---------|------------------------|-----------|
+| tmux drives Codex | `createSession()` in `tmux.ts` | Translate directly to Python subprocess |
+| Long prompt paste-buffer | `tmux load-buffer` + `paste-buffer` | Equally applicable; 5000-char threshold is reasonable |
+| notify-hook signal file | `watcher.ts` + `notify-hook.ts` | Port directly; no language barrier |
+| Session completion marker | `echo "[codex-agent: Session complete...]"` | Custom marker strategy |
+| Timeout detection via log mtime | `getLastActivityMs()` | Python `os.stat().st_mtime` |
+| Output fallback strategy | capture-pane → log file | Must implement two-level fallback |
+| JSONL session parsing | `session-parser.ts` | Parse `~/.codex/sessions/` for tokens |
 
-### 值得注意的实现细节
+### Implementation Details Worth Noting
 
-1. **sleep 时序**：创建会话后 sleep 1s（等待 TUI 初始化），send-keys 后 sleep 0.3s（等待 TUI 处理）。这些延迟是经验值，在 Python 中需要同等处理。
+1. **Sleep timing**: Sleep 1s after creating a session (wait for TUI initialization), sleep 0.3s after send-keys (wait for TUI to process). These delays are empirical values; equivalent handling is needed in Python.
 
-2. **单引号转义**：`message.replace(/'/g, "'\\''")` - 在 Python 中对应 `message.replace("'", "'\\''")` 或用 shlex。
+2. **Single-quote escaping**: `message.replace(/'/g, "'\\''")` — in Python: `message.replace("'", "'\\''")` or use shlex.
 
-3. **`script` 命令差异**：macOS 的 `script` 参数顺序与 Linux 不同（`script -q file cmd` vs `script -q -c cmd file`）。需要平台检测。
+3. **`script` command differences**: macOS's `script` argument order differs from Linux (`script -q file cmd` vs `script -q -c cmd file`). Platform detection is required.
 
-4. **`-a never` 参数**：关键！让 Codex 自动批准所有文件操作，否则 TUI 会等待人工确认导致挂起。
+4. **`-a never` argument**: Critical! Makes Codex auto-approve all file operations; otherwise the TUI waits for manual confirmation and hangs.
 
-5. **notify hook 格式**：Codex 的 notify 配置是数组格式 `["cmd", "arg1", "arg2"]`，payload 通过 stdin 或 argv 传入（项目用 argv[3]）。
+5. **notify hook format**: Codex's notify config is an array format `["cmd", "arg1", "arg2"]`; payload is passed via stdin or argv (this project uses argv[3]).
 
-6. **`read` 命令防止会话退出**：`codex ...; echo "...complete..."; read` - 这个 pattern 让会话在 codex 退出后继续存活，确保 capture-pane 能读到最终输出。
+6. **`read` prevents session exit**: `codex ...; echo "...complete..."; read` — this pattern keeps the session alive after codex exits, ensuring capture-pane can read the final output.
 
 ---
 
-## 架构图
+## Architecture Diagram
 
 ```
 Claude Code (orchestrator)
@@ -398,30 +398,30 @@ tmux.ts
     ├── send-keys {prompt} + Enter
     └── [tmux session running]
            │
-           │ [Codex TUI 运行中]
+           │ [Codex TUI running]
            │
-           ├── notify-hook.ts (agent turn 结束)
-           │     └── 写入 {id}.turn-complete 信号文件
+           ├── notify-hook.ts (agent turn ends)
+           │     └── write {id}.turn-complete signal file
            │
            └── echo "[codex-agent: Session complete...]" + read
                  │
-                 └── jobs.ts: refreshJobStatus() 检测到 complete marker
+                 └── jobs.ts: refreshJobStatus() detects complete marker
 
-Claude Code 轮询:
-    ├── signalFileExists({id}) → turn 完成 → 读摘要 → 发送后续指令
-    ├── capturePane(-20行) → 检测 complete marker
-    └── getJobsJson() → 解析 ~/.codex/sessions/*.jsonl → tokens + files + summary
+Claude Code polling:
+    ├── signalFileExists({id}) → turn complete → read summary → send follow-up instruction
+    ├── capturePane(-20 lines) → detect complete marker
+    └── getJobsJson() → parse ~/.codex/sessions/*.jsonl → tokens + files + summary
 ```
 
 ---
 
-## 参考资料
+## References
 
 - [kingbootoshi/codex-orchestrator (GitHub)](https://github.com/kingbootoshi/codex-orchestrator)
-- [源码: tmux.ts](https://raw.githubusercontent.com/kingbootoshi/codex-orchestrator/main/src/tmux.ts)
-- [源码: jobs.ts](https://raw.githubusercontent.com/kingbootoshi/codex-orchestrator/main/src/jobs.ts)
-- [源码: notify-hook.ts](https://raw.githubusercontent.com/kingbootoshi/codex-orchestrator/main/src/notify-hook.ts)
-- [源码: watcher.ts](https://raw.githubusercontent.com/kingbootoshi/codex-orchestrator/main/src/watcher.ts)
-- [源码: session-parser.ts](https://raw.githubusercontent.com/kingbootoshi/codex-orchestrator/main/src/session-parser.ts)
-- [源码: output-cleaner.ts](https://raw.githubusercontent.com/kingbootoshi/codex-orchestrator/main/src/output-cleaner.ts)
-- [源码: config.ts](https://raw.githubusercontent.com/kingbootoshi/codex-orchestrator/main/src/config.ts)
+- [Source: tmux.ts](https://raw.githubusercontent.com/kingbootoshi/codex-orchestrator/main/src/tmux.ts)
+- [Source: jobs.ts](https://raw.githubusercontent.com/kingbootoshi/codex-orchestrator/main/src/jobs.ts)
+- [Source: notify-hook.ts](https://raw.githubusercontent.com/kingbootoshi/codex-orchestrator/main/src/notify-hook.ts)
+- [Source: watcher.ts](https://raw.githubusercontent.com/kingbootoshi/codex-orchestrator/main/src/watcher.ts)
+- [Source: session-parser.ts](https://raw.githubusercontent.com/kingbootoshi/codex-orchestrator/main/src/session-parser.ts)
+- [Source: output-cleaner.ts](https://raw.githubusercontent.com/kingbootoshi/codex-orchestrator/main/src/output-cleaner.ts)
+- [Source: config.ts](https://raw.githubusercontent.com/kingbootoshi/codex-orchestrator/main/src/config.ts)

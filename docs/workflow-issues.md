@@ -1,45 +1,45 @@
-# 工作流问题分析报告
+# Workflow Issue Analysis Report
 
-**日期**: 2026-03-05
-**来源**: Codex Code Review & Fix 工作流（2026-03-05 11:10–11:50）
-**涉及 Job**: ece8b9e3, 9fc1e82d, 8d45037f, 8e6c6b37
-
----
-
-## 问题总览（按优先级排序）
-
-| 优先级 | 问题 | 状态 |
-|--------|------|------|
-| P0 | M-6: `--sandbox` 参数是死代码，未传入 provider | 已修复（codex.py + start 输出显示 sandbox） |
-| P0 | Codex 自动更新中断正在运行的任务 | 未解决（外部问题） |
-| P1 | `tcd wait` 阻塞 Claude Code 进程，用户无进展反馈 | Skill 已更新（待验证） |
-| P1 | 缺少前置写权限检查，修复任务白白消耗 token | 未解决（Skill 层改进） |
-| P2 | review 任务 vs 修复任务沙箱模式不可区分 | 未解决 |
-| P2 | 非 git 仓库无法用 git diff 检查 Codex 改动 | 未解决 |
-| P2 | Codex 路径空格导致 shell 命令失败 | Codex 自行规避 |
-| P3 | Skill 轮询模式实际效果未验证 | 待观察 |
-| **P0** | **`tcd merge` worktree 不存在时 FileNotFoundError + 假成功**（#2） | **已修复（2026-03-09）** |
-| P1 | `worktree_repo_root` 字段未持久化到 job JSON（#2） | 已确认为版本问题，代码正确 |
-| P2 | Job 完成后 status 仍为 "running"（#2） | **已修复（merge 后自动更新 status）** |
-| P2 | `tcd merge` 成功消息与实际结果不一致（#2） | **已修复（MergeResult + noop 检测）** |
-| **P0** | **AI 在 worktree 中不 commit，merge 时 noop**（#3） | **已修复（Skill prompt + merge pre-check, 2026-03-09）** |
-| P1 | 自举场景：用旧版 tcd 修 tcd 自身（#3） | **已缓解（Skill 自举警告, 2026-03-09）** |
-| P2 | STALL/TURN0_STUCK 误报（AI 在生成长文本时）（#3） | **已修复（pane_hash 检测, 2026-03-09）** |
-| P2 | `tcd merge` 无法区分"无 commit"和"已 merge"（#3） | **已修复（branch_has_new_commits pre-check, 2026-03-09）** |
+**Date**: 2026-03-05
+**Source**: Codex Code Review & Fix Workflow (2026-03-05 11:10–11:50)
+**Jobs involved**: ece8b9e3, 9fc1e82d, 8d45037f, 8e6c6b37
 
 ---
 
-## 详细分析
+## Issue Overview (by priority)
+
+| Priority | Issue | Status |
+|----------|-------|--------|
+| P0 | M-6: `--sandbox` parameter is dead code, not passed to provider | Fixed (codex.py + start output shows sandbox) |
+| P0 | Codex auto-update interrupts running tasks | Unresolved (external issue) |
+| P1 | `tcd wait` blocks Claude Code process with no progress feedback | Skill updated (pending verification) |
+| P1 | Missing pre-flight write permission check, fix tasks waste tokens | Unresolved (Skill-layer improvement) |
+| P2 | Review tasks vs fix tasks sandbox mode indistinguishable | Unresolved |
+| P2 | Non-git repos cannot use git diff to inspect Codex changes | Unresolved |
+| P2 | Codex path-with-spaces causes shell command failures | Codex self-mitigated |
+| P3 | Skill poll mode actual effectiveness unverified | To be observed |
+| **P0** | **`tcd merge` FileNotFoundError + false success when worktree missing (#2)** | **Fixed (2026-03-09)** |
+| P1 | `worktree_repo_root` field not persisted to job JSON (#2) | Confirmed as version issue; code is correct |
+| P2 | Job status remains "running" after completion (#2) | **Fixed (auto-update status after merge)** |
+| P2 | `tcd merge` success message inconsistent with actual result (#2) | **Fixed (MergeResult + noop detection)** |
+| **P0** | **AI doesn't commit in worktree, merge is noop (#3)** | **Fixed (Skill prompt + merge pre-check, 2026-03-09)** |
+| P1 | Bootstrapping: fixing tcd with old tcd (#3) | **Mitigated (Skill bootstrap warning, 2026-03-09)** |
+| P2 | STALL/TURN0_STUCK false positives (AI generating long text) (#3) | **Fixed (pane_hash detection, 2026-03-09)** |
+| P2 | `tcd merge` cannot distinguish "no commits" from "already merged" (#3) | **Fixed (branch_has_new_commits pre-check, 2026-03-09)** |
 
 ---
 
-### P0-1: M-6 — `--sandbox` 参数是死代码
+## Detailed Analysis
 
-**问题描述**
-`tcd start --sandbox workspace-write` 命令接受了 `--sandbox` 参数，但该参数未传入 Codex provider 的启动命令，导致 Codex 始终以默认沙箱模式运行（只读）。
+---
 
-**根因分析**
-经代码确认，这是一个**已修复的历史 bug**。查看当前 `src/tcd/providers/codex.py` 第 153-155 行：
+### P0-1: M-6 — `--sandbox` Parameter Is Dead Code
+
+**Issue Description**
+`tcd start --sandbox workspace-write` accepted the `--sandbox` argument, but the parameter was never passed to the Codex provider's launch command, causing Codex to always run in the default sandbox mode (read-only).
+
+**Root Cause Analysis**
+Code inspection confirms this is a **previously fixed historical bug**. See current `src/tcd/providers/codex.py` lines 153–155:
 
 ```python
 # sandbox mode (default: workspace-write)
@@ -47,167 +47,167 @@ sandbox = job.sandbox or "workspace-write"
 parts.append(f"-s {sandbox}")
 ```
 
-`job.sandbox` 已被正确读取并传入 `-s` 参数。
+`job.sandbox` is correctly read and passed as the `-s` parameter.
 
-然而在工作流执行时（2026-03-05 11:30），job `8e6c6b37` 仍然报告"只读沙箱"。可能的原因：
-1. 工作流执行时代码尚未修复（M-6 是此次 review 要修的 bug 之一）
-2. 或 Codex CLI 的 `-s workspace-write` 参数实际未生效（需验证 codex 版本行为）
+However, during workflow execution (2026-03-05 11:30), job `8e6c6b37` still reported "read-only sandbox". Possible reasons:
+1. The code was not yet fixed at workflow execution time (M-6 was one of the bugs this review was fixing)
+2. Or the Codex CLI's `-s workspace-write` parameter had no actual effect (needs verification against codex version behavior)
 
-**影响评估**
-- 严重程度：**阻塞级**（修复任务完全无法执行）
-- 频率：100%（每次修复任务都触发）
-- 波及：4 次修复尝试全部失败，累计浪费约 80k tokens
+**Impact Assessment**
+- Severity: **Blocking** (fix tasks completely cannot execute)
+- Frequency: 100% (every fix task triggers this)
+- Affected: 4 fix attempts all failed, consuming approximately 80k tokens
 
-**已有解决方案**
-当前代码（codex.py L154）已包含 sandbox 传参逻辑。需验证：
-1. 修复是否已生效（重新安装 `uv tool install .`）
-2. `codex -s workspace-write` 参数格式是否正确（codex v0.110.0 可能变更了参数格式）
+**Existing Fix**
+Current code (codex.py L154) already contains sandbox pass-through logic. Needs verification:
+1. Whether the fix has taken effect (reinstall with `uv tool install .`)
+2. Whether the `codex -s workspace-write` parameter format is correct (codex v0.110.0 may have changed the parameter format)
 
-**推荐改进方案**
-1. 在 `build_launch_command` 中加日志：`logger.info("sandbox=%s, cmd=%s", sandbox, inner_cmd)`
-2. `tcd start` 完成后输出实际启动命令（debug 模式），便于验证参数是否正确传入
-3. 编写测试：`test_codex_provider.py::test_sandbox_flag_included_in_command`
-4. 在 `tcd start` 输出中显示沙箱模式：`Sandbox: workspace-write`
+**Recommended Improvements**
+1. Add logging in `build_launch_command`: `logger.info("sandbox=%s, cmd=%s", sandbox, inner_cmd)`
+2. Output the actual launch command after `tcd start` completes (debug mode) for parameter verification
+3. Write test: `test_codex_provider.py::test_sandbox_flag_included_in_command`
+4. Display sandbox mode in `tcd start` output: `Sandbox: workspace-write`
 
-**优先级**: P0
+**Priority**: P0
 
 ---
 
-### P0-2: Codex 自动更新中断任务
+### P0-2: Codex Auto-Update Interrupts Tasks
 
-**问题描述**
-Job `9fc1e82d` 启动后，Codex CLI 自动更新从 v0.106.0 到 v0.110.0，进程重启，导致任务中断。`tcd wait` 超时（15 分钟），任务以 `killed by user` 失败（`turn_state: working`，`turn_count: 0`）。
+**Issue Description**
+After job `9fc1e82d` started, Codex CLI auto-updated from v0.106.0 to v0.110.0, the process restarted, and the task was interrupted. `tcd wait` timed out (15 minutes); the task failed with `killed by user` (`turn_state: working`, `turn_count: 0`).
 
-**根因分析**
-Codex CLI 在检测到新版本时会在 TUI 内弹出更新提示并自动执行更新。tcd 的 `_wait_for_tui()` 只处理了信任对话框（trust dialog），未处理更新重启场景。更新后进程重启，原 tmux session 内的 Codex 实例可能状态不一致，notify-hook 未被触发，信号文件永远不会写入，完成检测失效。
+**Root Cause Analysis**
+Codex CLI displays an update prompt in the TUI when a new version is detected and auto-executes the update. tcd's `_wait_for_tui()` only handles the trust dialog, not the update-restart scenario. After the update, the process restarts; the original Codex instance in the tmux session may be in an inconsistent state, the notify-hook is not triggered, the signal file is never written, and completion detection is broken.
 
-**影响评估**
-- 严重程度：**高**（导致任务完全失败，无输出）
-- 频率：不可预测（取决于 Codex 发版频率，活跃开发期可能每周触发）
-- 波及：浪费约 5k tokens（本次），可能导致后续重试成本倍增
+**Impact Assessment**
+- Severity: **High** (causes complete task failure with no output)
+- Frequency: Unpredictable (depends on Codex release frequency; may trigger weekly during active development)
+- Affected: ~5k tokens wasted (this instance); may compound retry costs
 
-**已有解决方案**
-无。
+**Existing Fix**
+None.
 
-**推荐改进方案**
+**Recommended Solutions**
 
-方案 A（推荐）：固定 Codex 版本，禁用自动更新
+Option A (recommended): Pin Codex version, disable auto-update
 ```bash
-# 使用 npm 安装固定版本
+# Install a specific version with npm
 npm install -g @openai/codex@0.110.0
 ```
-或在启动命令中添加环境变量禁用更新检查（需调研 Codex 是否支持 `CODEX_DISABLE_UPDATE_CHECK` 等变量）。
+Or add an environment variable to disable update checks at launch (research whether Codex supports `CODEX_DISABLE_UPDATE_CHECK` or similar).
 
-方案 B：在 `_wait_for_tui()` 中检测更新提示并处理
-在 `sdk.py:_wait_for_tui()` 和 `cli.py:start()` 中增加对更新提示的检测：
+Option B: Detect update prompts in `_wait_for_tui()`
+Add update prompt detection in `sdk.py:_wait_for_tui()` and `cli.py:start()`:
 ```python
 update_phrases = ["A new version", "Updating", "Restarting after update"]
 if any(phrase in pane for phrase in update_phrases):
-    time.sleep(5)  # 等待更新完成
-    trust_handled = True  # 重置，等待重启后的 TUI
+    time.sleep(5)  # wait for update to complete
+    trust_handled = True  # reset, wait for TUI after restart
     continue
 ```
 
-方案 C：`tcd check` 增加"更新检测"状态
-检测到 Codex 更新重启时，自动重新注入 prompt。
+Option C: Add "update detection" state to `tcd check`
+When a Codex update restart is detected, automatically re-inject the prompt.
 
-**优先级**: P0
+**Priority**: P0
 
 ---
 
-### P1-1: `tcd wait` 阻塞导致用户无反馈
+### P1-1: `tcd wait` Blocks with No User Feedback
 
-**问题描述**
-调用 `tcd wait <job_id>` 后，Claude Code 进程在一个 Bash 调用中阻塞，用户在等待期间（最长达 15 分钟）看不到任何进展输出。
+**Issue Description**
+After calling `tcd wait <job_id>`, the Claude Code process blocks inside a single Bash call; the user sees no progress output during the wait (up to 15 minutes).
 
-**根因分析**
-`tcd wait` 是一个阻塞式 while 循环（`cli.py:280-312`）：
+**Root Cause Analysis**
+`tcd wait` is a blocking while loop (`cli.py:280-312`):
 ```python
 while time.time() < deadline:
     ...
     time.sleep(poll_interval)
 ```
-当作为子进程在 Claude Code 的 Bash 工具中调用时，整个 Bash 调用被阻塞，Claude Code 无法在等待期间向用户输出任何内容。
+When called as a subprocess inside Claude Code's Bash tool, the entire Bash call is blocked and Claude Code cannot output anything to the user while waiting.
 
-**影响评估**
-- 严重程度：**中**（用户体验差，不阻塞功能）
-- 频率：每次使用旧 Skill 时触发
-- 波及：2 次任务（ece8b9e3 5分钟，9fc1e82d 15分钟）
+**Impact Assessment**
+- Severity: **Medium** (poor user experience, does not block functionality)
+- Frequency: every time the old Skill is used
+- Affected: 2 tasks (ece8b9e3 5 minutes, 9fc1e82d 15 minutes)
 
-**已有解决方案**
-codex-worker Skill 已更新为**轮询模式**：禁止使用 `tcd wait`，改为每 15 秒一次独立 Bash 调用（`tcd check` + `tcd output | tail -30`），并在两次调用之间向用户输出进展摘要。
+**Existing Fix**
+The codex-worker Skill has been updated to **poll mode**: `tcd wait` is prohibited; instead, each poll is an independent Bash call (`tcd check` + `tcd output | tail -30`) every 15 seconds, with progress summaries output to the user between calls.
 
-**推荐改进方案**
-1. Skill 更新已覆盖此场景（见 SKILL.md Step 2）
-2. 在 `tcd wait` 命令添加警告：`"Warning: tcd wait blocks the caller. Use tcd check in a loop for interactive use."`
-3. 可选：在 `tcd wait` 中添加 `--progress` 标志，定期向 stderr 输出进度（`elapsed: 30s, state: working`）
+**Recommended Improvements**
+1. Skill update already covers this scenario (see SKILL.md Step 2)
+2. Add a warning to `tcd wait`: `"Warning: tcd wait blocks the caller. Use tcd check in a loop for interactive use."`
+3. Optional: add a `--progress` flag to `tcd wait` to periodically output progress to stderr (`elapsed: 30s, state: working`)
 
-**优先级**: P1
+**Priority**: P1
 
 ---
 
-### P1-2: 缺少前置写权限检查，重复浪费 token
+### P1-2: Missing Pre-flight Write Permission Check, Repeated Token Waste
 
-**问题描述**
-修复任务启动前未验证 Codex 是否有写权限，导致 Codex 读完代码、分析完毕后才发现无法写文件，4 次重试共浪费约 80k tokens。
+**Issue Description**
+Fix tasks were started without verifying whether Codex had write permission, causing Codex to read the code and complete analysis before discovering it couldn't write files — 4 retries wasted approximately 80k tokens.
 
-**根因分析**
-当前工作流：启动 → 注入提示词 → Codex 读代码（20-40k tokens）→ 准备写文件 → 发现权限拒绝 → 报错退出。
+**Root Cause Analysis**
+Current workflow: launch → inject prompt → Codex reads code (20-40k tokens) → prepares to write file → discovers permission denied → errors out.
 
-缺少前置检查步骤：在注入修复任务提示词之前，先验证 Codex 能否在目标目录写文件。
+Missing a pre-flight check step: before injecting the fix task prompt, verify whether Codex can write files in the target directory.
 
-**影响评估**
-- 严重程度：**高**（资金损失，token 费用）
-- 频率：每次 sandbox 配置错误时必然触发
-- 波及：3 次修复任务 × 约 25k tokens = 75k tokens 浪费
+**Impact Assessment**
+- Severity: **High** (financial loss from token costs)
+- Frequency: triggered every time sandbox is misconfigured
+- Affected: 3 fix tasks × ~25k tokens = ~75k tokens wasted
 
-**已有解决方案**
-无。
+**Existing Fix**
+None.
 
-**推荐改进方案**
+**Recommended Solutions**
 
-方案 A（推荐）：在 codex-worker Skill 中添加前置检查步骤
-在 Step 1（启动任务）前插入验证步骤：
+Option A (recommended): Add pre-flight check step in codex-worker Skill
+Insert a verification step before Step 1 (start task):
 ```bash
-# 验证写权限（发送探针提示词）
-tcd start -p codex -m "执行：touch .tcd-write-probe && echo OK || echo READONLY" -d <dir>
-# 检查输出，确认包含 OK 再继续正式任务
+# Verify write permission (send probe prompt)
+tcd start -p codex -m "Execute: touch .tcd-write-probe && echo OK || echo READONLY" -d <dir>
+# Check output, confirm it contains OK before proceeding with actual task
 ```
 
-方案 B：`tcd start` 添加 `--verify-write` 标志
-在 provider 启动后、注入正式提示词前，先注入一个写权限探针命令，验证通过后再注入真实 prompt。
+Option B: Add `--verify-write` flag to `tcd start`
+After the provider starts but before injecting the real prompt, inject a write-permission probe command; proceed only after verification passes.
 
-方案 C：在提示词中前置声明（最轻量）
-在修复类提示词开头加：
+Option C: Declare pre-condition in the prompt (lightest approach)
+Add to the beginning of fix-type prompts:
 ```
-首先，执行 touch .tcd-probe 验证写权限。如果失败（operation not permitted），立即停止并报告，不要继续读代码。
+First, execute: touch .tcd-probe to verify write permission. If it fails (operation not permitted), stop immediately and report — do not continue reading code.
 ```
 
-**优先级**: P1
+**Priority**: P1
 
 ---
 
-### P2-1: review 任务 vs 修复任务沙箱模式混用
+### P2-1: Review Tasks vs Fix Tasks Sandbox Mode Confusion
 
-**问题描述**
-Code review 任务只需读权限（只读沙箱即可），但修复任务必须有写权限（`workspace-write`）。当前 tcd 没有任务类型概念，编排者需要手动为修复任务指定 `--sandbox workspace-write`，容易遗漏。
+**Issue Description**
+Code review tasks only need read permission (read-only sandbox is fine), but fix tasks require write permission (`workspace-write`). tcd has no concept of task type; the orchestrator must manually specify `--sandbox workspace-write` for fix tasks, which is easy to forget.
 
-**根因分析**
-`tcd start` 的 `--sandbox` 是可选参数，默认值由 provider 决定（codex.py L154: `job.sandbox or "workspace-write"`）。当前默认值已是 `workspace-write`，但在修复 M-6 之前，该默认值未生效。即使修复后，编排者仍需手动区分任务类型。
+**Root Cause Analysis**
+`tcd start`'s `--sandbox` is optional, with a default determined by the provider (codex.py L154: `job.sandbox or "workspace-write"`). The current default is already `workspace-write`, but before the M-6 fix, this default was ineffective. Even after the fix, the orchestrator still needs to manually distinguish task types.
 
-**影响评估**
-- 严重程度：**中**（误配置会导致任务失败）
-- 频率：低（仅在工作流设计不当时触发）
+**Impact Assessment**
+- Severity: **Medium** (misconfiguration causes task failure)
+- Frequency: Low (only triggers when workflow design is flawed)
 
-**已有解决方案**
-codex-worker Skill 的"注意事项"中已提及 `workspace-write` 沙箱模式，但未明确区分两种任务。
+**Existing Fix**
+The codex-worker Skill's "notes" section mentions `workspace-write` sandbox mode but does not explicitly distinguish between two task types.
 
-**推荐改进方案**
-在 codex-worker Skill 中明确区分两种任务模式：
-- **review 模式**：提示词包含"不要修改代码"，`--sandbox read-only`（如 Codex 支持）
-- **修复模式**：默认 `workspace-write`，并在 Skill 中强调
+**Recommended Solutions**
+Explicitly distinguish two task modes in the codex-worker Skill:
+- **Review mode**: prompt includes "do not modify code", `--sandbox read-only` (if Codex supports it)
+- **Fix mode**: default `workspace-write`, emphasized in the Skill
 
-在 `tcd start` 输出中显示实际沙箱模式：
+Display actual sandbox mode in `tcd start` output:
 ```
 Job started: 8e6c6b37
 Provider: codex
@@ -215,269 +215,269 @@ Sandbox: workspace-write
 tmux session: tcd-codex-8e6c6b37
 ```
 
-**优先级**: P2
+**Priority**: P2
 
 ---
 
-### P2-2: 非 git 仓库无法用 git diff 检查 Codex 改动
+### P2-2: Non-git Repos Cannot Use git diff to Inspect Codex Changes
 
-**问题描述**
-编排者想通过 `git diff` 检查 Codex 做了哪些修改，但项目目录不是 git 仓库，命令失败。
+**Issue Description**
+The orchestrator wanted to use `git diff` to inspect what Codex modified, but the project directory is not a git repository, so the command fails.
 
-**根因分析**
-项目目录 `/Users/michael/projects/AI 工作流/tmux-codingagent-driver` 没有 `.git` 目录（或不在 git tracking 范围内）。Codex 的 `parse_response_structured()` 方法返回 `files_modified` 列表（通过 NDJSON `apply_patch` 事件），但该信息未暴露给编排者。
+**Root Cause Analysis**
+The project directory `/Users/michael/projects/AI 工作流/tmux-codingagent-driver` has no `.git` directory (or is not within git tracking scope). Codex's `parse_response_structured()` returns a `files_modified` list (via NDJSON `apply_patch` events), but this information is not exposed to the orchestrator.
 
-**影响评估**
-- 严重程度：**低**（不影响任务执行，只影响验证）
-- 频率：中（任何非 git 项目都会遇到）
+**Impact Assessment**
+- Severity: **Low** (does not affect task execution, only verification)
+- Frequency: Medium (any non-git project will encounter this)
 
-**推荐改进方案**
-1. 使用 `tcd` 的结构化输出获取改动文件列表：
+**Recommended Solutions**
+1. Use tcd's structured output to get the changed file list:
    ```bash
-   # 通过 Python SDK
+   # Via Python SDK
    from tcd.providers.codex import CodexProvider
    output = prov.parse_response_structured(job)
    print(output.files_modified)
    ```
-2. 在 `tcd output` 中添加 `--files-modified` 标志，显示 Codex 修改的文件列表
-3. 对改动文件做内容 hash 比对（修改前后），替代 git diff
-4. 在 codex-worker Skill 中提示：验证改动时，优先用 `tcd output --files-modified`，git diff 作为补充
+2. Add `--files-modified` flag to `tcd output`, showing the list of files Codex modified
+3. Compare content hashes of changed files (before and after) as a substitute for git diff
+4. In the codex-worker Skill, advise: when verifying changes, prefer `tcd output --files-modified`; use git diff as a supplement
 
-**优先级**: P2
-
----
-
-### P2-3: Codex 路径空格导致 shell 命令失败
-
-**问题描述**
-Codex 执行 shell 命令时，项目路径（`/Users/michael/projects/AI 工作流/tmux-codingagent-driver`）中的中文空格导致命令失败。
-
-**根因分析**
-Shell 命令中未引用的路径遇到空格会被分割为多个参数。这是 Codex 生成 shell 命令时的典型问题。
-
-**影响评估**
-- 严重程度：**低**（Codex 有时能自行修正）
-- 频率：中（所有含空格路径的项目都可能触发）
-
-**已有解决方案**
-本次工作流中 Codex 自行发现并用引号规避了此问题。
-
-**推荐改进方案**
-1. 在 codex-worker Skill 的提示词模板中加入路径引用提示
-2. `tcd start` 的 `-d` 参数传入前对路径加引号（`shlex.quote(cwd)`）
-3. 长期：项目目录避免含空格（最根本解法）
-
-**优先级**: P2
+**Priority**: P2
 
 ---
 
-### P3: Skill 轮询模式实际效果待验证
+### P2-3: Codex Path with Spaces Causes Shell Command Failures
 
-**问题描述**
-更新后的 codex-worker Skill 要求每次轮询是独立的 Bash 调用。但另一个独立运行的 Claude Code 进程是否会严格按新 Skill 执行尚未验证。
+**Issue Description**
+When Codex executes shell commands, the project path (`/Users/michael/projects/AI 工作流/tmux-codingagent-driver`) contains Chinese characters and a space, causing command failures.
 
-**根因分析**
-Claude Code 读取 Skill 后，执行策略由模型决定。Skill 中的关键约束（"每次轮询必须是独立的 Bash 调用"）依赖模型遵从文本指令，不是强制约束。在高负载或 context 较长时，模型可能"退化"为 while 循环。
+**Root Cause Analysis**
+Unquoted paths in shell commands containing spaces get split into multiple arguments. This is a typical issue when Codex generates shell commands.
 
-**影响评估**
-- 严重程度：**低**（仅影响用户体验）
-- 频率：不确定
+**Impact Assessment**
+- Severity: **Low** (Codex sometimes self-corrects)
+- Frequency: Medium (any project with spaces in the path may trigger this)
 
-**推荐改进方案**
-1. 下次使用 codex-worker Skill 时，观察 Claude Code 是否按轮询模式执行
-2. 如果发现退化，在 Skill 中加更强的约束语言：`"CRITICAL: Never use while loops or tcd wait."`
-3. 长期：考虑在 `tcd check` 中添加 `--watch` 模式，自动输出进度到 stdout（规避 Bash 阻塞问题）
+**Existing Fix**
+In this workflow run, Codex discovered and mitigated this issue itself by quoting the path.
 
-**优先级**: P3
+**Recommended Solutions**
+1. Add path quoting hints to the codex-worker Skill prompt template
+2. Quote the path before passing it to the `-d` parameter of `tcd start` (`shlex.quote(cwd)`)
+3. Long-term: avoid spaces in project directory names (the most fundamental solution)
+
+**Priority**: P2
 
 ---
 
-## 根因链
+### P3: Skill Poll Mode Actual Effectiveness Unverified
+
+**Issue Description**
+The updated codex-worker Skill requires each poll to be an independent Bash call. Whether a separately running Claude Code process will strictly follow the new Skill has not been verified.
+
+**Root Cause Analysis**
+After Claude Code reads the Skill, execution strategy is determined by the model. The key constraint in the Skill ("each poll must be an independent Bash call") relies on the model following text instructions and is not a hard constraint. Under high load or with long context, the model may "regress" to using a while loop.
+
+**Impact Assessment**
+- Severity: **Low** (only affects user experience)
+- Frequency: uncertain
+
+**Recommended Solutions**
+1. Observe whether Claude Code follows poll mode in the next codex-worker Skill use
+2. If regression is found, add stronger constraint language to the Skill: `"CRITICAL: Never use while loops or tcd wait."`
+3. Long-term: consider adding a `--watch` mode to `tcd check` that automatically outputs progress to stdout (working around the Bash blocking issue)
+
+**Priority**: P3
+
+---
+
+## Root Cause Chain
 
 ```
-M-6（sandbox 参数未传入）
-    → Codex 以只读沙箱运行
-    → review 任务无法写文件（影响可接受）
-    → 修复任务无法写文件（阻塞器）
-        → 重试 3 次（每次 ~25k tokens）
-            → 80k tokens 浪费
-                → 前置检查缺失是放大因子
+M-6 (sandbox parameter not passed)
+    → Codex runs in read-only sandbox
+    → review tasks cannot write (acceptable)
+    → fix tasks cannot write (blocker)
+        → 3 retries (~25k tokens each)
+            → 80k tokens wasted
+                → missing pre-flight check is an amplifying factor
 ```
 
 ---
 
-## 行动项
+## Action Items
 
-### 立即执行（P0）
+### Immediate (P0)
 
-- [ ] 验证 M-6 修复是否生效：`tcd start --sandbox workspace-write`，确认 codex 以 `workspace-write` 模式运行
-- [ ] 验证 `codex -s workspace-write` 参数格式（codex v0.110.0 changelog）
-- [ ] 调研 Codex 自动更新禁用方法（环境变量 / npm 固定版本）
+- [ ] Verify M-6 fix is effective: `tcd start --sandbox workspace-write`, confirm Codex runs in `workspace-write` mode
+- [ ] Verify `codex -s workspace-write` parameter format (codex v0.110.0 changelog)
+- [ ] Research Codex auto-update disable method (environment variable / npm pin version)
 
-### 短期（P1，本周）
+### Short-term (P1, this week)
 
-- [ ] 在修复类提示词开头加写权限探针：`touch .tcd-probe && echo OK || echo READONLY && exit`
-- [ ] 在 `tcd start` 输出中显示实际沙箱模式
-- [ ] 为 codex provider 添加启动命令日志（debug 级别）
+- [ ] Add write permission probe at beginning of fix-type prompts: `touch .tcd-probe && echo OK || echo READONLY && exit`
+- [ ] Display actual sandbox mode in `tcd start` output
+- [ ] Add launch command logging for codex provider (debug level)
 
-### 中期（P2，下个迭代）
+### Medium-term (P2, next iteration)
 
-- [ ] `tcd output --files-modified`：显示 Codex 修改的文件列表
-- [ ] codex-worker Skill：明确区分 review 模式和修复模式
-- [ ] 编写测试：`test_sandbox_flag_in_command`
-
----
-
-## 参考
-
-- 相关 Job 记录：`~/.tcd/jobs/ece8b9e3.json`（review），`8e6c6b37.json`（第三次修复尝试）
-- 工作流日志：`docs/workflow-log.md`
-- Codex provider 源码：`src/tcd/providers/codex.py`
-- Codex Worker Skill：`~/.claude/skills/codex-worker/SKILL.md`
-
----
----
-
-# 工作流问题分析报告 #2
-
-**日期**: 2026-03-08
-**来源**: feishu-cli auto-dev 工作流（2026-03-08 22:40–23:30）
-**场景**: 使用 tcd 并行 worktree 模式为 feishu-cli 项目开发 8 个新 CLI 功能
-**涉及 Job**: 3b18e3c1（Group A: export+import）, e76f3bcb（Group B: copy+move+folder）, 16370815（Group C: bitable-search+bitable-delete）, 4af58644（Group D: wiki-spaces）
+- [ ] `tcd output --files-modified`: display list of files Codex modified
+- [ ] codex-worker Skill: explicitly distinguish review mode and fix mode
+- [ ] Write test: `test_sandbox_flag_in_command`
 
 ---
 
-## 问题总览（按优先级排序）
+## References
 
-| 优先级 | 问题 | 状态 |
-|--------|------|------|
-| P0 | `tcd merge` 在 worktree 目录不存在时报 FileNotFoundError，但误报合并成功 | 未解决 |
-| P1 | `tcd merge` cleanup 阶段 `remove_worktree` 找不到已消失的 worktree 目录 | 未解决（P0 的子问题） |
-| P1 | `worktree_repo_root` 字段未持久化到 job JSON | 待确认 |
-| P2 | Job 完成后 status 仍为 "running"，`completed_at` 为 null | 未解决 |
-| P2 | `tcd merge` 成功消息与实际结果不一致（用户被误导） | 未解决 |
+- Related job records: `~/.tcd/jobs/ece8b9e3.json` (review), `8e6c6b37.json` (third fix attempt)
+- Workflow log: `docs/workflow-log.md`
+- Codex provider source: `src/tcd/providers/codex.py`
+- Codex Worker Skill: `~/.claude/skills/codex-worker/SKILL.md`
+
+---
+---
+
+# Workflow Issue Analysis Report #2
+
+**Date**: 2026-03-08
+**Source**: feishu-cli auto-dev workflow (2026-03-08 22:40–23:30)
+**Scenario**: Using tcd parallel worktree mode to develop 8 new CLI features for the feishu-cli project
+**Jobs involved**: 3b18e3c1 (Group A: export+import), e76f3bcb (Group B: copy+move+folder), 16370815 (Group C: bitable-search+bitable-delete), 4af58644 (Group D: wiki-spaces)
 
 ---
 
-## 详细分析
+## Issue Overview (by priority)
+
+| Priority | Issue | Status |
+|----------|-------|--------|
+| P0 | `tcd merge` throws FileNotFoundError when worktree directory doesn't exist, but reports merge success | Unresolved |
+| P1 | `tcd merge` cleanup phase `remove_worktree` can't find disappeared worktree directory | Unresolved (sub-problem of P0) |
+| P1 | `worktree_repo_root` field not persisted to job JSON | Pending confirmation |
+| P2 | Job status remains "running" after completion, `completed_at` is null | Unresolved |
+| P2 | `tcd merge` success message inconsistent with actual result (user misled) | Unresolved |
 
 ---
 
-### P0-3: `tcd merge` FileNotFoundError + 假成功
+## Detailed Analysis
 
-**问题描述**
+---
 
-在 feishu-cli 项目（路径 `/Users/michael/projects/组件模块/feishu-cli`）中，使用 `tcd start --worktree` 启动 4 个并行 Codex 任务。所有任务编码完成并提交到各自的 `tcd/<job_id>` 分支。之后执行 `tcd merge <job_id>` 时：
+### P0-3: `tcd merge` FileNotFoundError + False Success
 
-1. 命令输出了 `"Merged tcd/3b18e3c1 (merge)."` 成功消息
-2. 紧接着抛出 `FileNotFoundError: No such file or directory` 指向 worktree 路径
-3. **实际检查 main 分支发现：代码并未被合并**
-4. 手动执行 `git merge --no-ff tcd/3b18e3c1` 才真正完成合并
+**Issue Description**
 
-4 个 Job 全部复现此问题，100% 触发率。
+In the feishu-cli project (path `/Users/michael/projects/组件模块/feishu-cli`), 4 parallel Codex tasks were launched with `tcd start --worktree`. All tasks completed coding and committed to their respective `tcd/<job_id>` branches. When `tcd merge <job_id>` was executed:
 
-**复现步骤**
+1. The command output `"Merged tcd/3b18e3c1 (merge)."` success message
+2. Immediately followed by `FileNotFoundError: No such file or directory` pointing to the worktree path
+3. **Actual inspection of the main branch showed: code was not merged**
+4. Manually executing `git merge --no-ff tcd/3b18e3c1` successfully completed the merge
+
+All 4 jobs reproduced this issue; 100% trigger rate.
+
+**Reproduction Steps**
 
 ```bash
-# 1. 在含中文路径的 repo 中启动 worktree 任务
+# 1. Start a worktree task in a repo with a non-ASCII path
 cd /Users/michael/projects/组件模块/feishu-cli
 tcd start -p codex -m "..." --worktree
 # Job: 3b18e3c1, worktree: /Users/michael/projects/组件模块/feishu-cli-wt-3b18e3c1
 
-# 2. 等待 Codex 完成编码（status 检查显示 turn_state: idle）
+# 2. Wait for Codex to finish coding (status check shows turn_state: idle)
 
-# 3. 执行 merge
+# 3. Execute merge
 tcd merge 3b18e3c1
-# 输出: "Merged tcd/3b18e3c1 (merge)."
-# 然后: FileNotFoundError: [Errno 2] No such file or directory: '/Users/michael/projects/组件模块/feishu-cli-wt-3b18e3c1'
+# Output: "Merged tcd/3b18e3c1 (merge)."
+# Then: FileNotFoundError: [Errno 2] No such file or directory: '/Users/michael/projects/组件模块/feishu-cli-wt-3b18e3c1'
 
-# 4. 检查 main 分支 — 代码未合并
-git log --oneline -3  # 看不到 merge commit
+# 4. Check main branch — code not merged
+git log --oneline -3  # no merge commit visible
 
-# 5. 手动 merge 成功
-git merge --no-ff tcd/3b18e3c1  # 正常合并，无冲突
+# 5. Manual merge succeeds
+git merge --no-ff tcd/3b18e3c1  # merges cleanly, no conflicts
 ```
 
-**根因分析**
+**Root Cause Analysis**
 
-问题出在 `cli.py:693-737` 的 `merge()` 函数，分两层：
+The problem is in the `merge()` function at `cli.py:693-737`, on two levels:
 
-**层 1：`repo_root` 计算可能指向错误目录**
+**Level 1: `repo_root` calculation may point to the wrong directory**
 
 ```python
 # cli.py L708
 repo_root = Path(job.worktree_repo_root) if job.worktree_repo_root else get_main_repo_root(job.cwd)
 ```
 
-- `job.worktree_repo_root`：在 job JSON 中**缺失**（见下方 P1-3），导致走 fallback 路径
-- `get_main_repo_root(job.cwd)` 中 `job.cwd` = worktree 路径 `/Users/michael/projects/组件模块/feishu-cli-wt-3b18e3c1`
-- 如果 worktree 目录已被清理，`subprocess.run(cwd=str(path))` 会抛 `FileNotFoundError`
-- 如果 worktree 目录仍存在但 git 状态异常，`get_main_repo_root` 可能返回错误的 repo root
-- `merge_branch()` 在错误的 repo root 下执行 `git merge`，可能是 no-op（already up to date），returncode=0，误报成功
+- `job.worktree_repo_root`: **missing** from the job JSON (see P1-3 below), causing a fallback
+- `get_main_repo_root(job.cwd)` where `job.cwd` = worktree path `/Users/michael/projects/组件模块/feishu-cli-wt-3b18e3c1`
+- If the worktree directory has been cleaned up, `subprocess.run(cwd=str(path))` throws `FileNotFoundError`
+- If the worktree directory still exists but git state is abnormal, `get_main_repo_root` may return the wrong repo root
+- `merge_branch()` executes `git merge` under the wrong repo root, which may be a no-op (already up to date), returncode=0, falsely reporting success
 
-**层 2：cleanup 阶段缺少防御**
+**Level 2: cleanup phase lacks defense**
 
 ```python
 # cli.py L723-725
 if not no_cleanup and job.worktree_path:
     try:
-        remove_worktree(job.worktree_path)  # FileNotFoundError 在这里抛出
+        remove_worktree(job.worktree_path)  # FileNotFoundError thrown here
 ```
 
-`remove_worktree()` 在 `worktree.py:124-127` 中：
+`remove_worktree()` in `worktree.py:124-127`:
 ```python
 def remove_worktree(worktree_path):
     wt = Path(worktree_path)
     if not wt.exists():
-        return  # 这行应该防御了，但 FileNotFoundError 仍然抛出
+        return  # this line should guard, but FileNotFoundError still thrown
 ```
 
-说明 `wt.exists()` 返回 True（目录存在）但后续的 `subprocess.run(cwd=str(wt))` 时目录被并发删除，或者 `common_dir_result` 的 `subprocess.run` 的 `cwd` 解析失败。
+This indicates `wt.exists()` returns True (directory exists) but the subsequent `subprocess.run(cwd=str(wt))` is triggered after the directory is concurrently deleted, or the `common_dir_result`'s `subprocess.run`'s `cwd` resolution fails.
 
-**实际 Job 数据证据**
+**Actual Job Data Evidence**
 
-从 `~/.tcd/jobs/3b18e3c1.json` 可以看到：
+From `~/.tcd/jobs/3b18e3c1.json`:
 
 ```json
 {
   "cwd": "/Users/michael/projects/组件模块/feishu-cli-wt-3b18e3c1",
   "worktree_path": "/Users/michael/projects/组件模块/feishu-cli-wt-3b18e3c1",
   "worktree_branch": "tcd/3b18e3c1",
-  "status": "running",          // ← 应该是 completed
-  "completed_at": null           // ← 应该有时间戳
-  // 注意：没有 worktree_repo_root 字段！
+  "status": "running",          // ← should be completed
+  "completed_at": null           // ← should have a timestamp
+  // Note: no worktree_repo_root field!
 }
 ```
 
-**影响评估**
-- 严重程度：**阻塞级**（merge 假成功导致用户以为代码已合并，实际未合并）
-- 频率：100%（所有 4 个 job 全部触发）
-- 波及：需要手动 `git merge --no-ff` 补救，增加约 10 分钟手动操作。如果用户未手动检查，可能导致代码丢失
+**Impact Assessment**
+- Severity: **Blocking** (false-success merge leads user to believe code is merged; it's not)
+- Frequency: 100% (all 4 jobs triggered)
+- Affected: requires manual `git merge --no-ff` to recover, adding ~10 minutes of manual work. If not caught, may result in code loss
 
-**推荐修复方案**
+**Recommended Fix**
 
-方案 A（推荐，分 3 步）：
+Option A (recommended, 3 steps):
 
-1. **修复 `repo_root` 计算逻辑**（`cli.py:708`）：
+1. **Fix `repo_root` calculation** (`cli.py:708`):
 
 ```python
-# 优先用 worktree_repo_root（主仓库原始路径）
+# Prefer worktree_repo_root (original main repo path)
 if job.worktree_repo_root:
     repo_root = Path(job.worktree_repo_root)
 elif job.worktree_path and Path(job.worktree_path).exists():
     repo_root = get_main_repo_root(job.worktree_path)
 else:
-    # worktree 已不存在，尝试从 branch name 推断原始 repo
-    # 或者直接报错让用户手动 merge
+    # worktree no longer exists; try to infer original repo from branch name
+    # or simply error out with a manual merge instruction
     click.echo(f"Error: worktree at {job.worktree_path} no longer exists.", err=True)
     click.echo(f"Manual merge: git merge --no-ff {job.worktree_branch}", err=True)
     sys.exit(1)
 ```
 
-2. **合并后验证**（`cli.py:719` 后添加）：
+2. **Post-merge verification** (add after `cli.py:719`):
 
 ```python
-# 验证 merge 确实生效：检查 branch 的 HEAD 是否是当前 HEAD 的祖先
+# Verify merge actually took effect: check that branch HEAD is an ancestor of current HEAD
 verify = subprocess.run(
     ["git", "merge-base", "--is-ancestor", job.worktree_branch, "HEAD"],
     cwd=str(repo_root), capture_output=True
@@ -486,34 +486,34 @@ if verify.returncode != 0:
     click.echo(f"Warning: merge may not have taken effect. Verify with: git log --oneline -5", err=True)
 ```
 
-3. **cleanup 防御加强**（`worktree.py:remove_worktree`）：
+3. **Strengthen cleanup defense** (`worktree.py:remove_worktree`):
 
 ```python
 def remove_worktree(worktree_path):
     wt = Path(worktree_path)
     if not wt.exists():
-        return  # 已不存在，静默返回
+        return  # already gone, silent return
     try:
-        # ... 现有逻辑 ...
+        # ... existing logic ...
     except (FileNotFoundError, WorktreeError):
-        # worktree 在检查后被并发删除，忽略
+        # worktree disappeared after check (concurrent deletion), ignore
         logger.warning("Worktree %s disappeared during cleanup", wt)
 ```
 
-方案 B（最小改动应急）：
+Option B (minimal change emergency):
 
-在 `merge()` 函数开头就计算并验证 `repo_root`，如果无法获取则提示手动命令后退出：
+Compute and validate `repo_root` at the beginning of the `merge()` function; if it cannot be determined, print the manual command and exit:
 
 ```python
 def merge(job_id, squash, no_cleanup):
     # ... load job ...
 
-    # 计算 repo_root，优先用持久化的原始路径
+    # Compute repo_root, prefer persisted original path
     repo_root = None
     if job.worktree_repo_root:
         repo_root = Path(job.worktree_repo_root)
     else:
-        # Fallback: 从 worktree_path 推导
+        # Fallback: derive from worktree_path
         wt = Path(job.worktree_path) if job.worktree_path else None
         if wt and wt.exists():
             repo_root = get_main_repo_root(str(wt))
@@ -526,68 +526,68 @@ def merge(job_id, squash, no_cleanup):
         sys.exit(1)
 ```
 
-**优先级**: P0
+**Priority**: P0
 
 ---
 
-### P1-3: `worktree_repo_root` 字段未持久化到 Job JSON
+### P1-3: `worktree_repo_root` Field Not Persisted to Job JSON
 
-**问题描述**
+**Issue Description**
 
-`Job` dataclass 在 `job.py:57` 定义了 `worktree_repo_root: str | None = None`，且 `cli.py:142` 在创建 worktree 后正确设置了 `job.worktree_repo_root = cwd`。但实际保存的 job JSON 中此字段**缺失**。
+The `Job` dataclass defines `worktree_repo_root: str | None = None` at `job.py:57`, and `cli.py:142` correctly sets `job.worktree_repo_root = cwd` after creating the worktree. But the actually saved job JSON **does not have this field**.
 
-**证据**
+**Evidence**
 
-4 个 job 的 JSON 文件中都没有 `worktree_repo_root` 字段：
+None of the 4 job JSON files contain the `worktree_repo_root` field:
 
 ```bash
-# 检查所有 4 个相关 job
+# Check all 4 related jobs
 grep -l "worktree_repo_root" ~/.tcd/jobs/{3b18e3c1,e76f3bcb,16370815,4af58644}.json
-# 无输出 — 字段不存在
+# No output — field does not exist
 ```
 
-但 `Job.to_dict()` 使用 `dataclasses.asdict()` 应该序列化所有字段，包括值为 None 的。
+But `Job.to_dict()` uses `dataclasses.asdict()` which should serialize all fields including those with None values.
 
-**根因分析**
+**Root Cause Analysis**
 
-两种可能：
+Two possibilities:
 
-1. **版本不一致**：用户通过 `uv tool install .` 安装了 tcd，但安装的版本可能早于添加 `worktree_repo_root` 字段的提交。源码已有此字段，但运行时的 `tcd` 可执行文件是旧版本。这意味着 `cli.py:142` 中的 `job.worktree_repo_root = cwd` 实际上只是在运行时对象上设了一个非 dataclass 字段的属性，`asdict()` 不会序列化它。
+1. **Version mismatch**: user installed tcd via `uv tool install .`, but the installed version may predate the commit that added `worktree_repo_root`. The source already has this field, but the running `tcd` executable is an older version. This means `cli.py:142`'s `job.worktree_repo_root = cwd` only sets a non-dataclass attribute on the runtime object; `asdict()` won't serialize it.
 
-2. **`save_job` 时序问题**：`worktree_repo_root` 在 `save_job` 之前被设置（`cli.py:142-149`），所以理论上应该被保存。如果是旧版本问题，则 `save_job` 调用的 `to_dict()` 不包含此字段。
+2. **`save_job` timing issue**: `worktree_repo_root` is set before `save_job` (`cli.py:142-149`), so it should theoretically be saved. If it's a version problem, then the `to_dict()` called by `save_job` doesn't include this field.
 
-**验证方法**
+**Verification Method**
 
 ```bash
-# 检查安装的 tcd 版本是否包含 worktree_repo_root
+# Check if the installed tcd version includes worktree_repo_root
 python3 -c "from tcd.job import Job; print('worktree_repo_root' in Job.__dataclass_fields__)"
 
-# 检查源码版本
+# Check source version
 grep worktree_repo_root src/tcd/job.py
 ```
 
-**影响评估**
-- 严重程度：**高**（直接导致 P0-3，merge 时无法找到正确的 repo root）
-- 频率：100%（如果确实是版本问题，所有 worktree job 都受影响）
+**Impact Assessment**
+- Severity: **High** (directly causes P0-3; merge cannot find the correct repo root)
+- Frequency: 100% (if confirmed as a version issue, all worktree jobs are affected)
 
-**推荐修复方案**
+**Recommended Fix**
 
-1. 确认安装版本：`tcd --version` vs `git log --oneline -1 src/tcd/job.py`
-2. 如果版本不一致：重新安装 `uv tool install . --force`
-3. 添加版本校验：在 `tcd start --worktree` 中打印 job 保存后的字段列表（debug 级别），确认 `worktree_repo_root` 被序列化
-4. 长期：在 `merge()` 函数中添加对 `worktree_repo_root is None` 的明确警告
+1. Confirm installed vs source version: `tcd --version` vs `git log --oneline -1 src/tcd/job.py`
+2. If versions differ: reinstall `uv tool install . --force`
+3. Add version validation: after saving the job in `tcd start --worktree`, print the saved field list (debug level) to confirm `worktree_repo_root` is serialized
+4. Long-term: add an explicit warning for `worktree_repo_root is None` in the `merge()` function
 
-**优先级**: P1
+**Priority**: P1
 
 ---
 
-### P2-4: Job 完成后 status 仍为 "running"
+### P2-4: Job Status Remains "running" After Completion
 
-**问题描述**
+**Issue Description**
 
-4 个 Codex job 全部完成编码并提交了 commit，但 job JSON 中 `status` 仍然是 `"running"`，`completed_at` 为 `null`。
+All 4 Codex jobs finished coding and committed, but the job JSON `status` is still `"running"` and `completed_at` is `null`.
 
-**证据**
+**Evidence**
 
 ```json
 // ~/.tcd/jobs/3b18e3c1.json
@@ -600,219 +600,219 @@ grep worktree_repo_root src/tcd/job.py
 }
 ```
 
-`turn_state: "idle"` 和有效的 `last_agent_message` 表明 Codex 确实完成了任务，但 job 状态未被更新为 `"completed"`。
+`turn_state: "idle"` and a valid `last_agent_message` confirm Codex did complete the task, but the job status was not updated to `"completed"`.
 
-**根因分析**
+**Root Cause Analysis**
 
-`tcd start` 命令中的 wait 循环（`cli.py` 的 start 函数）负责检测任务完成并更新状态。可能的原因：
+The wait loop in the `tcd start` command (`cli.py`'s start function) is responsible for detecting completion and updating status. Possible causes:
 
-1. `tcd start` 命令的 wait 阶段在检测到完成之前就被外部中断（调用者 Ctrl-C 或 timeout）
-2. 完成信号文件（`.tcd/jobs/<id>.turn-complete`）的检测逻辑与 Codex 的实际完成信号不匹配
-3. 后台运行的 `tcd start` 进程在 Claude Code 上下文压缩后丢失
+1. The `tcd start` command's wait phase was externally interrupted (caller Ctrl-C or timeout) before detecting completion
+2. The signal file (`.tcd/jobs/<id>.turn-complete`) detection logic doesn't match Codex's actual completion signal
+3. The background `tcd start` process was lost after Claude Code's context compaction
 
-**影响评估**
-- 严重程度：**中**（不影响合并，但导致 `tcd status` 显示不准确，且 auto-cleanup 逻辑不会触发）
-- 频率：需进一步调查（可能与 tcd 被作为后台进程调用有关）
+**Impact Assessment**
+- Severity: **Medium** (doesn't affect merging, but causes `tcd status` to show inaccurate info, and auto-cleanup logic won't trigger)
+- Frequency: needs further investigation (may be related to tcd being called as a background process)
 
-**推荐修复方案**
+**Recommended Fix**
 
-1. `tcd merge` 和 `tcd output` 中检测到 `turn_state == "idle"` 且 `last_agent_message` 非空时，自动将状态更新为 `"completed"`
-2. `tcd check` 命令增加对实际完成但状态未更新的检测（从 tmux session 状态推断）
-3. 添加 `tcd fix-status <job_id>` 子命令，手动触发状态修正
+1. In `tcd merge` and `tcd output`, when `turn_state == "idle"` and `last_agent_message` is non-empty, automatically update status to `"completed"`
+2. `tcd check` adds detection for "actually complete but status not updated" (infer from tmux session state)
+3. Add `tcd fix-status <job_id>` sub-command to manually trigger status correction
 
-**优先级**: P2
+**Priority**: P2
 
 ---
 
-### P2-5: `tcd merge` 成功消息与实际结果不一致
+### P2-5: `tcd merge` Success Message Inconsistent with Actual Result
 
-**问题描述**
+**Issue Description**
 
-`tcd merge` 输出 `"Merged tcd/3b18e3c1 (merge)."` 但代码并未实际合并到 main 分支。用户收到成功消息后认为合并完成，直到后续操作发现代码缺失才意识到问题。
+`tcd merge` output `"Merged tcd/3b18e3c1 (merge)."` but the code was not actually merged to the main branch. The user assumed the merge was complete after seeing the success message, only discovering the missing code during subsequent operations.
 
-**根因分析**
+**Root Cause Analysis**
 
-`cli.py:711` 中 `merge_branch()` 返回 `True`（`git merge` returncode=0），但可能的情况：
-- `git merge` 在错误的 `repo_root` 下执行，结果是 "Already up to date"（returncode=0 但无实际合并）
-- 或者 merge 确实在某个目录下成功了，但那不是用户期望的 main 分支
+`cli.py:711`'s `merge_branch()` returns `True` (`git merge` returncode=0), but possible scenarios:
+- `git merge` was executed in the wrong `repo_root`, result is "Already up to date" (returncode=0 but no actual merge)
+- Or the merge did succeed in some directory, but not in the user's expected main branch
 
-`merge_branch()` 只检查 returncode，不验证是否真的产生了 merge commit：
+`merge_branch()` only checks returncode, not whether a merge commit was actually created:
 
 ```python
 # worktree.py:181-187
 result = subprocess.run(cmd, cwd=str(repo_path), capture_output=True, text=True)
-return result.returncode == 0  # "Already up to date" 也返回 0！
+return result.returncode == 0  # "Already up to date" also returns 0!
 ```
 
-**推荐修复方案**
+**Recommended Fix**
 
-1. `merge_branch()` 检查 stdout 是否包含 "Already up to date"，如果是则返回特殊状态
-2. merge 成功后验证：检查 `git log -1 --format=%H` 是否变化
-3. 输出更详细的信息：`"Merged tcd/xxx (merge): 3 files changed, 204 insertions(+)"`
+1. `merge_branch()` checks if stdout contains "Already up to date"; if so, returns a special status
+2. Post-merge verification: check if `git log -1 --format=%H` changed
+3. Output more detailed info: `"Merged tcd/xxx (merge): 3 files changed, 204 insertions(+)"`
 
-**优先级**: P2
+**Priority**: P2
 
 ---
 
-## 根因链
+## Root Cause Chain
 
 ```
-worktree_repo_root 未持久化（P1-3，可能是版本问题）
-    → merge() 无法获取原始 repo 路径
-    → fallback 到 get_main_repo_root(job.cwd)
-    → job.cwd 指向 worktree 路径（可能已不存在或状态异常）
-        → 情况 A：目录不存在 → FileNotFoundError
-        → 情况 B：目录存在但 repo_root 计算错误 → git merge 在错误目录执行
-            → "Already up to date" → returncode=0 → 误报成功
-                → 用户以为合并完成，实际代码未合并
-    → cleanup 阶段 remove_worktree 再次触发 FileNotFoundError
+worktree_repo_root not persisted (P1-3, possibly a version issue)
+    → merge() cannot get original repo path
+    → fallback to get_main_repo_root(job.cwd)
+    → job.cwd points to worktree path (may not exist or be in abnormal state)
+        → Case A: directory doesn't exist → FileNotFoundError
+        → Case B: directory exists but repo_root computed wrongly → git merge runs in wrong dir
+            → "Already up to date" → returncode=0 → false success reported
+                → user thinks merge is done; code not actually merged
+    → cleanup phase remove_worktree triggers FileNotFoundError again
 ```
 
-辅助因素：
-- Job status 未正确更新为 completed（P2-4），导致 auto-cleanup 未触发
-- merge 成功消息缺乏验证（P2-5），用户被误导
+Contributing factors:
+- Job status not correctly updated to completed (P2-4), so auto-cleanup didn't trigger
+- Merge success message lacks verification (P2-5), user misled
 
 ---
 
-## 行动项
+## Action Items
 
-### 立即执行（P0）
+### Immediate (P0)
 
-- [ ] 验证安装版本 vs 源码版本：`python3 -c "from tcd.job import Job; print(Job.__dataclass_fields__.keys())"` 并对比源码
-- [ ] 如版本不一致，重新安装：`cd ~/projects/AI\ 工作流/tmux-codingagent-driver && uv tool install . --force`
-- [ ] 在 `merge()` 函数中：fallback 到 `worktree_repo_root` 失败时，打印手动 merge 命令而非假成功
-- [ ] `merge_branch()` 返回后验证 merge 确实生效（用 `git merge-base --is-ancestor` 或检查 HEAD 变化）
+- [ ] Verify installed vs source version: `python3 -c "from tcd.job import Job; print(Job.__dataclass_fields__.keys())"` and compare to source
+- [ ] If versions differ, reinstall: `cd ~/projects/AI\ 工作流/tmux-codingagent-driver && uv tool install . --force`
+- [ ] In `merge()` function: when fallback to `worktree_repo_root` fails, print the manual merge command instead of falsely reporting success
+- [ ] After `merge_branch()` returns, verify the merge actually took effect (use `git merge-base --is-ancestor` or check HEAD change)
 
-### 短期（P1，本周）
+### Short-term (P1, this week)
 
-- [ ] `merge()` 中对 `worktree_repo_root is None` 添加 warning 日志
-- [ ] `remove_worktree()` 添加 try/except 防御，目录消失时不抛异常
-- [ ] `merge_branch()` 区分 "Already up to date" 和真正的合并成功
-- [ ] merge 成功后输出 `git diff --stat` 摘要
+- [ ] Add warning log for `worktree_repo_root is None` in `merge()`
+- [ ] Add try/except defense to `remove_worktree()`; don't throw exception when directory disappears
+- [ ] `merge_branch()` distinguishes "Already up to date" from a true successful merge
+- [ ] Output `git diff --stat` summary after successful merge
 
-### 中期（P2，下个迭代）
+### Medium-term (P2, next iteration)
 
-- [ ] `tcd check` 增加对 "实际完成但状态未更新" 的检测和自动修正
-- [ ] `tcd merge` 增加 `--dry-run` 模式，显示将要执行的操作但不实际执行
-- [ ] 添加集成测试：在含非 ASCII 路径（如中文）的 repo 中执行完整 worktree 生命周期
+- [ ] `tcd check` adds detection and auto-correction for "actually complete but status not updated"
+- [ ] `tcd merge` adds `--dry-run` mode, showing what would be done without executing
+- [ ] Add integration test: complete worktree lifecycle in a repo with non-ASCII path (e.g. Chinese)
 
 ---
 
-## 复现环境
+## Reproduction Environment
 
 - macOS Darwin 24.6.0
-- tcd 源码版本：v0.3.0（`~/projects/AI 工作流/tmux-codingagent-driver`）
-- 项目路径：`/Users/michael/projects/组件模块/feishu-cli`（注意中文 `组件模块`）
+- tcd source version: v0.3.0 (`~/projects/AI 工作流/tmux-codingagent-driver`)
+- Project path: `/Users/michael/projects/组件模块/feishu-cli` (note Chinese `组件模块`)
 - Codex provider
-- 4 个并行 worktree job 同时触发
+- 4 parallel worktree jobs triggered simultaneously
 
-## 参考
+## References
 
-- 相关 Job 记录：`~/.tcd/jobs/3b18e3c1.json`、`e76f3bcb.json`、`16370815.json`、`4af58644.json`
-- 源码：`src/tcd/cli.py:693-737`（merge 函数）、`src/tcd/worktree.py:100-161`（worktree 操作）、`src/tcd/job.py:36-74`（Job 数据模型）
-- 手动修复记录：feishu-cli 项目 git log（`git merge --no-ff tcd/3b18e3c1` 等 4 条）
-
----
----
-
-# 工作流问题分析报告 #3
-
-**日期**: 2026-03-09
-**来源**: tcd 自身 bug 修复 + Codex Code Review + 并行 worktree 修复工作流
-**场景**: 使用 tcd 驱动 Codex 审核并修复 tcd 自身的 worktree merge 代码
+- Related job records: `~/.tcd/jobs/3b18e3c1.json`, `e76f3bcb.json`, `16370815.json`, `4af58644.json`
+- Source: `src/tcd/cli.py:693-737` (merge function), `src/tcd/worktree.py:100-161` (worktree operations), `src/tcd/job.py:36-74` (Job data model)
+- Manual fix record: feishu-cli project git log (`git merge --no-ff tcd/3b18e3c1` and 3 other similar commits)
 
 ---
+---
 
-## 问题总览
+# Workflow Issue Analysis Report #3
 
-| 优先级 | 问题 | 状态 |
-|--------|------|------|
-| P0 | AI 在 worktree 中不 commit，导致 merge 时 "Already up to date" | 已修复（Skill prompt 指令 + merge pre-check） |
-| P1 | 自举场景：用旧版 tcd 修 tcd 自身，旧版包含正在修的 bug | 已缓解（Skill 自举警告） |
-| P2 | STALL/TURN0_STUCK 误报（AI 在生成长文本时） | 已修复（pane_hash 变化检测） |
-| P2 | merge 无法区分"无 commit"和"已合并" | 已修复（branch_has_new_commits pre-check） |
+**Date**: 2026-03-09
+**Source**: tcd self bug-fix + Codex Code Review + parallel worktree fix workflow
+**Scenario**: Using tcd to drive Codex to review and fix tcd's own worktree merge code
 
 ---
 
-## 详细分析
+## Issue Overview
 
-### P0-4: AI 在 worktree 中不 commit
-
-**问题描述**
-
-使用 `tcd start --worktree` 派发任务给 Codex。Codex 完成代码修改并通过测试，但没有执行 `git commit`。worktree 分支上没有新 commit。执行 `tcd merge` 时 `git merge` 返回 "Already up to date"（returncode=0），旧版 tcd 报告合并成功，实际无变化。cleanup 阶段删除 worktree 目录，AI 的修改永久丢失。
-
-**根因分析**
-
-tcd 的 worktree 功能假设 AI 会自行 commit 修改，但 Codex 在 full-auto 模式下默认不 commit。这是 tcd（传输层）和 Skill（编排层）之间的**契约缺失**：
-- tcd 提供 `create → merge → cleanup` 生命周期原语
-- Skill 负责在 prompt 中指导 AI 的行为（包括 commit）
-- 但 codex-worker Skill 之前没有包含 commit 指令
-
-**修复方案**（已实施）
-
-1. **Skill 层**（`codex-worker/skill.md`）：worktree 场景下 prompt 必须追加 commit 指令
-2. **tcd 层**（`worktree.py`）：新增 `branch_has_new_commits()` 函数，merge 前预检查
-3. **tcd 层**（`cli.py` + `sdk.py`）：merge 前调用 pre-check，无新 commit 时输出明确诊断信息并退出
-
-### P1-4: 自举场景——用旧版 tcd 修 tcd
-
-**问题描述**
-
-开发流程中使用 `tcd merge` 合并 Codex 修复的代码，但全局安装的 tcd 是旧版（包含 merge 假成功 bug）。结果：
-- Group B worktree 被旧版 `tcd merge` 的 cleanup 删除，代码丢失
-- 必须手动重新实现 Group B 的所有修改
-
-**缓解方案**（已实施）
-
-在 codex-worker Skill 注意事项中添加自举警告：当修改目标是 tcd 自身时，建议先手动合并再更新全局版本。
-
-### P2-6: STALL 误报
-
-**问题描述**
-
-Codex 在生成长文本（如代码审核报告）时，`tcd check` 连续 4 次检测到 `state=working`，span > 60s，触发 STALL 警告。但 AI 实际在正常工作，只是输出时间较长。
-
-**根因分析**
-
-原 STALL 规则只检查 `job.checked` 事件的 state 字段是否变化，不检查 pane 内容是否在更新。长时间 state=working 不等于卡住。
-
-**修复方案**（已实施）
-
-1. `cli.py` 和 `sdk.py` 的 check 流程在 state=working 时计算 pane 内容的 md5 hash，写入 `job.checked` 事件
-2. `diagnostics.py` R2 规则检查 `pane_hash`：如果 hash 在连续检查中变化，说明 AI 在活跃输出，不触发 STALL
-3. 向后兼容：无 hash 数据时（旧事件）仍按原逻辑触发
-
-### P2-7: merge 无法区分"无 commit"和"已合并"
-
-**问题描述**
-
-`git merge` 对于"分支无新 commit"和"分支已被合并"都返回 "Already up to date"（returncode=0）。之前的 noop 检测只能在 merge 后发现，无法在 merge 前区分两种情况。
-
-**修复方案**（已实施）
-
-新增 `branch_has_new_commits(repo_path, branch)` 函数，使用 `git log HEAD..branch` 预检查。merge 前调用，0 commit 时直接报错并提示用户检查 worktree。
+| Priority | Issue | Status |
+|----------|-------|--------|
+| P0 | AI doesn't commit in worktree, merge results in "Already up to date" | Fixed (Skill prompt instruction + merge pre-check) |
+| P1 | Bootstrapping: fixing tcd with old tcd that contains the bug being fixed | Mitigated (Skill bootstrap warning) |
+| P2 | STALL/TURN0_STUCK false positives (AI generating long text) | Fixed (pane_hash change detection) |
+| P2 | merge cannot distinguish "no commits" from "already merged" | Fixed (branch_has_new_commits pre-check) |
 
 ---
 
-## 责任边界分析
+## Detailed Analysis
 
-本轮修复明确了 tcd 与 Skill 的责任边界：
+### P0-4: AI Doesn't Commit in Worktree
 
-| 职责 | tcd（传输层） | Skill（编排层） |
-|------|--------------|----------------|
-| AI 必须 commit | 提供 pre-check 和清晰错误信息 | 在 prompt 中包含 commit 指令 |
-| 自举检测 | 不涉及 | 在注意事项中提醒 |
-| 卡住检测 | 用 pane_hash 区分真卡住和在工作 | 根据 STALL 警告决定是否干预 |
-| 分支检查 | 提供 `branch_has_new_commits()` | 不涉及 |
+**Issue Description**
 
-**核心原则**：tcd 提供工具和信号，Skill 提供策略和决策。
+`tcd start --worktree` was used to dispatch tasks to Codex. Codex completed code modifications and passed tests, but did not execute `git commit`. The worktree branch had no new commits. When `tcd merge` ran, `git merge` returned "Already up to date" (returncode=0); the old tcd version reported merge success with no actual change. The cleanup phase deleted the worktree directory and the AI's modifications were permanently lost.
+
+**Root Cause Analysis**
+
+tcd's worktree feature assumes the AI will self-commit changes, but Codex in full-auto mode does not commit by default. This is a **missing contract** between tcd (transport layer) and Skill (orchestration layer):
+- tcd provides `create → merge → cleanup` lifecycle primitives
+- Skill is responsible for guiding AI behavior in the prompt (including committing)
+- But the codex-worker Skill previously did not include commit instructions
+
+**Fix** (implemented)
+
+1. **Skill layer** (`codex-worker/skill.md`): in worktree scenarios, prompt must append commit instructions
+2. **tcd layer** (`worktree.py`): added `branch_has_new_commits()` function, pre-checks before merge
+3. **tcd layer** (`cli.py` + `sdk.py`): calls pre-check before merge; outputs clear diagnostics and exits when no new commits
+
+### P1-4: Bootstrapping — Fixing tcd with Old tcd
+
+**Issue Description**
+
+The development workflow used `tcd merge` to merge Codex-fixed code, but the globally installed tcd was the old version (containing the merge false-success bug). Result:
+- Group B worktree was deleted by old `tcd merge`'s cleanup phase; code was lost
+- All Group B modifications had to be manually re-implemented
+
+**Mitigation** (implemented)
+
+Added a bootstrapping warning to the codex-worker Skill notes: when the modification target is tcd itself, recommend manual merge before updating the global version.
+
+### P2-6: STALL False Positive
+
+**Issue Description**
+
+When Codex was generating long text (such as a code review report), `tcd check` detected `state=working` 4 consecutive times with elapsed > 60s, triggering a STALL warning. But the AI was actually working normally; the output just took a long time.
+
+**Root Cause Analysis**
+
+The original STALL rule only checked whether the `state` field in `job.checked` events had changed; it did not check whether pane content was updating. Long `state=working` duration does not equal being stuck.
+
+**Fix** (implemented)
+
+1. In `cli.py` and `sdk.py`'s check flow, when `state=working`, compute an md5 hash of the pane content and write it to the `job.checked` event
+2. `diagnostics.py` R2 rule checks `pane_hash`: if the hash changes between consecutive checks, the AI is actively outputting; STALL is not triggered
+3. Backward compatible: when no hash data is present (old events), original logic still applies
+
+### P2-7: merge Cannot Distinguish "No Commits" from "Already Merged"
+
+**Issue Description**
+
+`git merge` returns "Already up to date" (returncode=0) for both "branch has no new commits" and "branch was already merged". The previous noop detection could only discover this after the merge, not distinguish the two cases before merging.
+
+**Fix** (implemented)
+
+Added `branch_has_new_commits(repo_path, branch)` function using `git log HEAD..branch` for pre-checking. Called before merge; errors out with user guidance when commit count is 0.
 
 ---
 
-## 参考
+## Responsibility Boundary Analysis
 
-- 修复 commit: 见 `git log --oneline -5` on main
-- 受影响文件: `src/tcd/worktree.py`, `src/tcd/cli.py`, `src/tcd/sdk.py`, `src/tcd/diagnostics.py`
-- 新增测试: `test_r2_stall_suppressed_when_pane_hash_changes`, `test_r2_stall_triggers_with_same_pane_hash`, `test_merge_command_no_new_commits`
-- Skill 更新: `~/.claude/skills/codex-worker/skill.md`
+This fix round clarified the responsibility boundary between tcd and Skill:
+
+| Responsibility | tcd (transport layer) | Skill (orchestration layer) |
+|----------------|-----------------------|-----------------------------|
+| AI must commit | Provide pre-check and clear error messages | Include commit instructions in prompt |
+| Bootstrap detection | Not applicable | Remind in notes |
+| Stuck detection | Use pane_hash to distinguish truly stuck from working | Decide whether to intervene based on STALL warning |
+| Branch checking | Provide `branch_has_new_commits()` | Not applicable |
+
+**Core principle**: tcd provides tools and signals; Skill provides strategy and decisions.
+
+---
+
+## References
+
+- Fix commits: see `git log --oneline -5` on main
+- Affected files: `src/tcd/worktree.py`, `src/tcd/cli.py`, `src/tcd/sdk.py`, `src/tcd/diagnostics.py`
+- New tests: `test_r2_stall_suppressed_when_pane_hash_changes`, `test_r2_stall_triggers_with_same_pane_hash`, `test_merge_command_no_new_commits`
+- Skill update: `~/.claude/skills/codex-worker/skill.md`
