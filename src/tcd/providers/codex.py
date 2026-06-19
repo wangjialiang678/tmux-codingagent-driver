@@ -50,19 +50,35 @@ def _mcp_server_names() -> list[str]:
     return names
 
 
+# MCP servers to KEEP enabled for tcd-driven Codex jobs. Everything else in the
+# user's config is disabled. Override with the TCD_CODEX_MCP_KEEP env var
+# (comma-separated names; empty string = keep none). Default keeps context7 so
+# Codex can look up current library docs while coding.
+DEFAULT_MCP_KEEP = "context7"
+
+
+def _kept_mcp_servers() -> set[str]:
+    raw = os.environ.get("TCD_CODEX_MCP_KEEP", DEFAULT_MCP_KEEP)
+    return {s.strip() for s in raw.split(",") if s.strip()}
+
+
 def disabled_mcp_parts() -> list[str]:
     """Build ``-c mcp_servers.<name>.enabled=false`` args for every configured
-    MCP server.
+    MCP server *except* those on the keep-list (see :data:`DEFAULT_MCP_KEEP`).
 
-    tcd-driven Codex jobs are headless coding agents that don't need the user's
-    interactive MCP servers (pencil, playwright, search, …). Worse, Codex blocks
-    the TUI from accepting input until *every* MCP server finishes starting, and
-    a single slow one (e.g. ``playwright`` via ``npx``) can stall startup for
-    minutes — the prompt then lands in a not-yet-ready TUI and is dropped. We
-    disable them all so Codex starts immediately and reliably.
+    tcd-driven Codex jobs are headless coding agents that don't need most of the
+    user's interactive MCP servers (pencil, playwright, search, …). Worse, Codex
+    blocks the TUI from accepting input until *every* enabled MCP server finishes
+    starting, and a single slow one (e.g. ``playwright`` via ``npx``) can stall
+    startup for minutes — the prompt then lands in a not-yet-ready TUI and is
+    dropped. Disabling the servers a coding job doesn't need keeps startup fast
+    and reliable (the cost multiplies across parallel worktree jobs).
     """
+    keep = _kept_mcp_servers()
     parts: list[str] = []
     for name in _mcp_server_names():
+        if name in keep:
+            continue
         if re.fullmatch(r"[A-Za-z0-9_-]+", name):
             key = f"mcp_servers.{name}.enabled=false"
         else:

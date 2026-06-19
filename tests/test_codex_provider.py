@@ -54,23 +54,46 @@ def test_build_launch_command_pre_trusts_cwd(provider, job):
     assert "trust_level=" in cmd and "projects." in cmd
 
 
-def test_build_launch_command_disables_mcp_servers(provider, job, tmp_path, monkeypatch):
-    # Point Codex config at a temp home with two MCP servers configured.
-    home = tmp_path / "codex_home"
-    home.mkdir()
+def _write_mcp_config(home):
     (home / "config.toml").write_text(
         '[mcp_servers.playwright]\ncommand = "npx"\n\n'
+        '[mcp_servers.context7]\ncommand = "npx"\n\n'
         '[mcp_servers.node_repl]\ncommand = "node"\n\n'
         '[mcp_servers.node_repl.env]\nFOO = "bar"\n',
         encoding="utf-8",
     )
+
+
+def test_build_launch_command_disables_mcp_servers(provider, job, tmp_path, monkeypatch):
+    home = tmp_path / "codex_home"
+    home.mkdir()
+    _write_mcp_config(home)
     monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.delenv("TCD_CODEX_MCP_KEEP", raising=False)  # use default keep-list
     cmd = provider.build_launch_command(job)
     assert "mcp_servers.playwright.enabled=false" in cmd
     assert "mcp_servers.node_repl.enabled=false" in cmd
+    # context7 is on the default keep-list -> NOT disabled.
+    assert "mcp_servers.context7.enabled=false" not in cmd
     # node_repl.env is a sub-table, not a separate server.
     assert "mcp_servers.env.enabled=false" not in cmd
     assert cmd.count("enabled=false") == 2
+
+
+def test_mcp_keep_env_override(provider, job, tmp_path, monkeypatch):
+    home = tmp_path / "codex_home"
+    home.mkdir()
+    _write_mcp_config(home)
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    # Keep playwright instead of context7.
+    monkeypatch.setenv("TCD_CODEX_MCP_KEEP", "playwright")
+    cmd = provider.build_launch_command(job)
+    assert "mcp_servers.playwright.enabled=false" not in cmd
+    assert "mcp_servers.context7.enabled=false" in cmd
+    # Empty keep-list disables everything.
+    monkeypatch.setenv("TCD_CODEX_MCP_KEEP", "")
+    cmd = provider.build_launch_command(job)
+    assert cmd.count("enabled=false") == 3  # playwright, context7, node_repl
 
 
 def test_build_launch_command_with_model(provider, job):

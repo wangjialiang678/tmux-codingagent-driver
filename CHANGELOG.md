@@ -27,12 +27,14 @@ end-to-end path (`start` → develop → commit → `merge`) now works headlessl
 
 ### Codex no longer stalls on MCP startup
 
-- Codex blocks the TUI from accepting input until **every** configured MCP
-  server finishes starting; a single slow one (e.g. `playwright` via `npx`)
-  stalled startup for minutes, so the prompt landed in a not-yet-ready TUI and
-  was dropped. tcd-driven jobs are headless coders that don't need the user's
-  interactive MCP servers, so `build_launch_command` now enumerates them from
-  the Codex config and disables each with `-c mcp_servers.<name>.enabled=false`.
+- Codex blocks the TUI from accepting input until **every** enabled MCP server
+  finishes starting; a single slow one (e.g. `playwright` via `npx`) stalled
+  startup for minutes, so the prompt landed in a not-yet-ready TUI and was
+  dropped. tcd-driven jobs are headless coders that don't need most of the
+  user's interactive MCP servers, so `build_launch_command` now enumerates them
+  from the Codex config and disables each (`-c mcp_servers.<name>.enabled=false`)
+  **except a keep-list** — default `context7` (live library docs), overridable
+  via the `TCD_CODEX_MCP_KEEP` env var (comma-separated; empty = keep none).
 
 ### Prompt injection is now verified and resilient
 

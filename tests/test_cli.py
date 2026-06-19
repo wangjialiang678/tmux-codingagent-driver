@@ -66,7 +66,7 @@ def test_start_marks_failed_when_initial_send_fails(runner, tmp_jobs, monkeypatc
         def create_session(self, session, cmd, cwd):
             return True
 
-        def capture_pane(self, session):
+        def capture_pane(self, session, **kwargs):
             return "READY"
 
         def send_enter(self, session):
@@ -290,7 +290,7 @@ def test_check_json_includes_diagnostics_and_pane_tail(runner, tmp_jobs, monkeyp
         def session_exists(self, name):
             return True
 
-        def capture_pane(self, session):
+        def capture_pane(self, session, **kwargs):
             return "l1\nl2\nl3\nl4\nl5\nl6\nl7\n"
 
     class FakeProvider:

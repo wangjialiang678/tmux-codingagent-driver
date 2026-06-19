@@ -63,7 +63,7 @@ def _mock_start_dependencies(monkeypatch, worktree_path: str) -> MagicMock:
         def create_session(self, session, cmd, cwd):
             return True
 
-        def capture_pane(self, session):
+        def capture_pane(self, session, **kwargs):
             return "READY"
 
         def send_enter(self, session):
@@ -169,7 +169,7 @@ def test_start_worktree_rolls_back_on_prompt_send_failure(runner, tmp_jobs, monk
         def create_session(self, session, cmd, cwd):
             return True
 
-        def capture_pane(self, session):
+        def capture_pane(self, session, **kwargs):
             return "READY"
 
         def send_enter(self, session):
