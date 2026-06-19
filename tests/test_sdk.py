@@ -76,11 +76,48 @@ class TestStart:
             prov.build_launch_command.return_value = "codex"
             prov.build_prompt_wrapper.return_value = "wrapped prompt"
             prov.tui_ready_indicator = "›"
+            # Legacy behavior: no stability gate, no delivery verification.
+            prov.tui_stable_secs = 0.0
+            prov.verify_prompt_delivery = False
             mock_prov.return_value = prov
+            mock_tmux.capture_pane.return_value = "›"  # indicator present
 
             job = sdk.start("codex", "do something", "/tmp")
             assert job.id == "test123"
             assert job.status == "running"
+            mock_tmux.send_text.assert_called_once()
+
+    def test_start_resends_when_prompt_dropped(self, sdk, mock_tmux):
+        """verify_prompt_delivery resends if no evidence the prompt landed."""
+        with patch("tcd.sdk.get_provider") as mock_prov:
+            prov = MagicMock()
+            prov.build_launch_command.return_value = "codex"
+            prov.build_prompt_wrapper.return_value = "wrapped prompt"
+            prov.tui_ready_indicator = "›"
+            prov.tui_stable_secs = 0.0
+            prov.verify_prompt_delivery = True
+            mock_prov.return_value = prov
+            # Pane never shows the prompt or a working marker -> dropped.
+            mock_tmux.capture_pane.return_value = "›"
+
+            sdk.start("codex", "do something", "/tmp")
+            # initial send + 2 resends
+            assert mock_tmux.send_text.call_count == 3
+
+    def test_start_no_resend_when_prompt_lands(self, sdk, mock_tmux):
+        """No resend when the pane shows the prompt was received."""
+        with patch("tcd.sdk.get_provider") as mock_prov:
+            prov = MagicMock()
+            prov.build_launch_command.return_value = "codex"
+            prov.build_prompt_wrapper.return_value = "wrapped prompt"
+            prov.tui_ready_indicator = "›"
+            prov.tui_stable_secs = 0.0
+            prov.verify_prompt_delivery = True
+            mock_prov.return_value = prov
+            # Pane echoes the prompt snippet -> delivered, no resend.
+            mock_tmux.capture_pane.return_value = "› wrapped prompt\nWorking (1s)"
+
+            sdk.start("codex", "do something", "/tmp")
             mock_tmux.send_text.assert_called_once()
 
     def test_start_invalid_provider(self, sdk):

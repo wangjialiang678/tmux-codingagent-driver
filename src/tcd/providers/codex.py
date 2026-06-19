@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shlex
 import shutil
@@ -20,6 +21,54 @@ logger = logging.getLogger(__name__)
 
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 MODEL_RE = re.compile(r"^[a-zA-Z0-9._:/-]+$")
+
+# Top-level MCP server table headers, e.g. ``[mcp_servers.brave-search]`` (the
+# capture stops before any sub-table such as ``[mcp_servers.node_repl.env]``).
+_MCP_HEADER_RE = re.compile(r"^\s*\[mcp_servers\.([^.\]]+)")
+
+
+def _codex_config_path() -> Path:
+    """Path to the active Codex config.toml (honors $CODEX_HOME)."""
+    home = os.environ.get("CODEX_HOME")
+    base = Path(home) if home else Path.home() / ".codex"
+    return base / "config.toml"
+
+
+def _mcp_server_names() -> list[str]:
+    """Names of MCP servers configured in the user's Codex config."""
+    names: list[str] = []
+    try:
+        text = _codex_config_path().read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return names
+    for line in text.splitlines():
+        m = _MCP_HEADER_RE.match(line)
+        if m:
+            name = m.group(1).strip().strip('"').strip("'")
+            if name and name not in names:
+                names.append(name)
+    return names
+
+
+def disabled_mcp_parts() -> list[str]:
+    """Build ``-c mcp_servers.<name>.enabled=false`` args for every configured
+    MCP server.
+
+    tcd-driven Codex jobs are headless coding agents that don't need the user's
+    interactive MCP servers (pencil, playwright, search, …). Worse, Codex blocks
+    the TUI from accepting input until *every* MCP server finishes starting, and
+    a single slow one (e.g. ``playwright`` via ``npx``) can stall startup for
+    minutes — the prompt then lands in a not-yet-ready TUI and is dropped. We
+    disable them all so Codex starts immediately and reliably.
+    """
+    parts: list[str] = []
+    for name in _mcp_server_names():
+        if re.fullmatch(r"[A-Za-z0-9_-]+", name):
+            key = f"mcp_servers.{name}.enabled=false"
+        else:
+            key = f'mcp_servers."{name}".enabled=false'
+        parts.append(f"-c {shlex.quote(key)}")
+    return parts
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +172,16 @@ class CodexProvider(Provider):
     name = "codex"
     cli_command = "codex"
     tui_ready_indicator = "›"
+    # Codex prints "› Use /skills to list available skills" in its startup
+    # banner, so the indicator appears within ~0.5s — long before the TUI is
+    # actually accepting input (MCP servers are still initializing). Injecting
+    # the prompt that early silently drops the keystrokes. Require the pane to
+    # stop changing for this many seconds before declaring the TUI ready.
+    tui_stable_secs = 2.5
+    # After injecting the prompt, confirm Codex actually received it (a turn
+    # started / the prompt is echoed). If not, resend. Guards against the
+    # readiness race above slipping through on slow MCP startup.
+    verify_prompt_delivery = True
 
     def check_cli(self) -> None:
         if shutil.which(self.cli_command) is None:
@@ -150,9 +209,35 @@ class CodexProvider(Provider):
         # auto-approve all operations
         parts.append("-a never")
 
+        # Disable the launch-time auto-updater. When a newer Codex version is
+        # available, `codex` would otherwise run `npm install -g @openai/codex`,
+        # print "Please restart Codex", and exit WITHOUT ever starting the
+        # agent — the TUI never opens, the prompt is never sent, and the job
+        # appears stuck on turn 0. This breaks every tcd-driven Codex job after
+        # an upstream release (and races N ways in parallel batch mode).
+        parts.append("-c check_for_update_on_startup=false")
+
         # sandbox mode (default: danger-full-access)
         sandbox = job.sandbox or "danger-full-access"
         parts.append(f"-s {sandbox}")
+
+        # Pre-trust the working directory. Every tcd job runs in a directory
+        # Codex has never seen (worktree jobs *always* do), so Codex shows its
+        # first-run "Do you trust the contents of this directory?" dialog. That
+        # dialog blocks the TUI and swallows the injected prompt, making the job
+        # appear stuck on turn 0. Marking the dir trusted up front skips it
+        # (the readiness loop also auto-confirms the dialog as a fallback). Use
+        # the canonical path — Codex resolves symlinks (e.g. /tmp ->
+        # /private/tmp on macOS) and only matches the canonical form.
+        if job.cwd:
+            canonical = os.path.realpath(job.cwd)
+            toml_path = canonical.replace("\\", "\\\\").replace('"', '\\"')
+            trust_cfg = f'projects."{toml_path}".trust_level="trusted"'
+            parts.append(f"-c {shlex.quote(trust_cfg)}")
+
+        # Disable the user's interactive MCP servers for this headless job so
+        # Codex isn't blocked waiting for slow/failing servers to start.
+        parts.extend(disabled_mcp_parts())
 
         # model override
         if job.model:

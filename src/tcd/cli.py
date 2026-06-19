@@ -16,6 +16,7 @@ from tcd.collector import ResponseCollector
 from tcd.config import ensure_dirs, job_signal_path
 from tcd.diagnostics import diagnose
 from tcd.event_log import emit, load_events
+from tcd.readiness import verify_prompt_delivery, wait_for_tui
 from tcd.job import Job, JobManager, _now_iso
 from tcd.output_cleaner import clean_output
 from tcd.provider import get_provider, list_providers
@@ -167,45 +168,10 @@ def start(
         job.turn_state = "working"
         mgr.save_job(job)
 
-        # Wait for TUI init (poll for readiness indicator, up to 30s)
-        # Handles trust dialogs from Claude Code and Gemini CLI (which may restart)
-        indicator = prov.tui_ready_indicator
-        tui_ready = False
-        trust_handled = False
-        tui_wait_started = time.time()
-        for _ in range(60):
-            time.sleep(0.5)
-            pane = tmux.capture_pane(job.tmux_session)
-            if pane is None:
-                continue
-
-            # Handle trust/confirmation dialogs (Claude Code, Gemini CLI)
-            trust_phrases = [
-                "Yes, I trust this folder",
-                "Enter to confirm",
-                "Do you trust the files in this folder",
-            ]
-            if any(phrase in pane for phrase in trust_phrases):
-                tmux.send_enter(job.tmux_session)
-                trust_handled = True
-                time.sleep(2)
-                continue
-
-            # After trust handling, wait for restart to complete
-            if trust_handled and "restarting" in pane.lower():
-                time.sleep(1)
-                continue
-
-            if indicator and indicator in pane:
-                if trust_handled:
-                    # Extra delay after restart to let TUI fully initialize
-                    time.sleep(1)
-                tui_ready = True
-                break
-        if not tui_ready:
-            # Fallback: just wait a bit and try anyway
-            time.sleep(2)
-        elapsed_ms = int((time.time() - tui_wait_started) * 1000)
+        # Wait for TUI readiness. Handles trust dialogs and, for providers that
+        # need it (Codex), waits for the pane to settle so the prompt isn't
+        # injected before the TUI can accept input. See tcd.readiness.
+        tui_ready, elapsed_ms, trust_handled = wait_for_tui(tmux, job.tmux_session, prov)
         if tui_ready:
             logger.info("start %s: TUI ready in %dms (trust_handled=%s)", job.id, elapsed_ms, trust_handled)
             emit(job.id, "job.tui_ready", elapsed_ms=elapsed_ms, trust_handled=trust_handled)
@@ -224,6 +190,11 @@ def start(
             raise RuntimeError("failed to send initial prompt to tmux session")
         logger.info("start %s: prompt sent (%d bytes, req_id=%s)", job.id, len(wrapped.encode("utf-8")), req_id)
         emit(job.id, "job.prompt_sent", bytes=len(wrapped.encode("utf-8")), req_id=req_id)
+
+        # Verify the prompt actually landed and resend if it was dropped (e.g.
+        # injected while a slow TUI was still initializing).
+        if getattr(prov, "verify_prompt_delivery", False):
+            verify_prompt_delivery(tmux, job.tmux_session, job.id, wrapped)
 
         click.echo(f"Job started: {job.id}")
         click.echo(f"Provider: {provider}")

@@ -28,6 +28,15 @@ class Provider(ABC):
     # Substring to detect when the TUI is ready to accept input.
     # Override in subclasses. None means just use a fixed delay.
     tui_ready_indicator: str | None = None
+    # After the readiness indicator appears, require the pane to remain
+    # unchanged for this many seconds before declaring the TUI ready. Guards
+    # against indicators that appear in a startup banner before the TUI can
+    # actually accept input. 0 = declare ready as soon as the indicator shows
+    # (legacy behavior).
+    tui_stable_secs: float = 0.0
+    # After injecting the prompt, verify the agent actually received it and
+    # resend if it was dropped. Off by default (legacy behavior).
+    verify_prompt_delivery: bool = False
 
     @abstractmethod
     def build_launch_command(self, job: Job) -> str:

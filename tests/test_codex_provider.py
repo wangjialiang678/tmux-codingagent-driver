@@ -44,6 +44,35 @@ def test_build_launch_command(provider, job):
     assert "read" in cmd
 
 
+def test_build_launch_command_disables_auto_update(provider, job):
+    # The launch-time auto-updater would otherwise exit before the agent starts.
+    assert "check_for_update_on_startup=false" in provider.build_launch_command(job)
+
+
+def test_build_launch_command_pre_trusts_cwd(provider, job):
+    cmd = provider.build_launch_command(job)
+    assert "trust_level=" in cmd and "projects." in cmd
+
+
+def test_build_launch_command_disables_mcp_servers(provider, job, tmp_path, monkeypatch):
+    # Point Codex config at a temp home with two MCP servers configured.
+    home = tmp_path / "codex_home"
+    home.mkdir()
+    (home / "config.toml").write_text(
+        '[mcp_servers.playwright]\ncommand = "npx"\n\n'
+        '[mcp_servers.node_repl]\ncommand = "node"\n\n'
+        '[mcp_servers.node_repl.env]\nFOO = "bar"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    cmd = provider.build_launch_command(job)
+    assert "mcp_servers.playwright.enabled=false" in cmd
+    assert "mcp_servers.node_repl.enabled=false" in cmd
+    # node_repl.env is a sub-table, not a separate server.
+    assert "mcp_servers.env.enabled=false" not in cmd
+    assert cmd.count("enabled=false") == 2
+
+
 def test_build_launch_command_with_model(provider, job):
     job.model = "gpt-5"
     cmd = provider.build_launch_command(job)

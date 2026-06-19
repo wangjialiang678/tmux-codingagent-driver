@@ -1,5 +1,61 @@
 # Changelog
 
+## v0.3.2 — 2026-06-20
+
+Codex launch reliability fixes. Every tcd-driven Codex job in a fresh directory
+(which is *every* `--worktree` job) was silently failing on turn 0 and falling
+back to other agents. Four distinct, stacked causes were found and fixed; the
+end-to-end path (`start` → develop → commit → `merge`) now works headlessly.
+
+### Codex no longer dies on launch (auto-update)
+
+- Codex's launch-time auto-updater would run `npm install -g @openai/codex`,
+  print "Please restart Codex", and exit **before the agent ever started** —
+  whenever upstream published a new version (frequently), and N-ways in parallel
+  batch mode. `build_launch_command` now passes
+  `-c check_for_update_on_startup=false`.
+
+### Codex no longer blocks on the trust dialog
+
+- Current Codex asks "Do you trust the contents of this directory?" on first
+  entry to any new directory. The readiness loop's trust-phrase list only knew
+  the older "Do you trust the files in this folder" wording, so it never
+  confirmed the dialog — the prompt was injected into the dialog and the job
+  died. tcd now (a) pre-trusts the working directory via
+  `-c projects."<cwd>".trust_level="trusted"` (canonical path) and (b) matches
+  the broader "Do you trust" phrase and auto-confirms with Enter as a fallback.
+
+### Codex no longer stalls on MCP startup
+
+- Codex blocks the TUI from accepting input until **every** configured MCP
+  server finishes starting; a single slow one (e.g. `playwright` via `npx`)
+  stalled startup for minutes, so the prompt landed in a not-yet-ready TUI and
+  was dropped. tcd-driven jobs are headless coders that don't need the user's
+  interactive MCP servers, so `build_launch_command` now enumerates them from
+  the Codex config and disables each with `-c mcp_servers.<name>.enabled=false`.
+
+### Prompt injection is now verified and resilient
+
+- New shared module `tcd/readiness.py` holds the TUI-readiness and
+  prompt-delivery logic that `cli.py` (`tcd start`) and `sdk.py` previously
+  duplicated — they had drifted, so SDK-side fixes never reached the CLI path.
+- `wait_for_tui` adds optional **pane-stability gating** (`tui_stable_secs`,
+  2.5s for Codex): it waits for the pane to stop changing before declaring the
+  TUI ready, instead of firing on a readiness indicator that appears in a
+  startup banner. It captures the **visible screen only** (`-S 0`) so a
+  dismissed dialog lingering in scrollback can't be re-matched forever.
+- `verify_prompt_delivery` (`verify_prompt_delivery=True` for Codex) confirms
+  the prompt was received (echoed text / "esc to interrupt") and resends up to
+  twice if it was dropped. New events: `job.prompt_resend`,
+  `job.prompt_confirmed`, `job.prompt_unconfirmed`.
+
+### Tests
+
+- Added Codex launch-command tests (auto-update off, pre-trust, MCP disable),
+  SDK resend/no-resend tests, and readiness coverage. Total: 246 passing.
+
+---
+
 ## v0.3.1 — 2026-03-09
 
 Worktree robustness fix round: 5 commits focused on merge safety and STALL false-positive issues. See `docs/workflow-issues.md` for details.

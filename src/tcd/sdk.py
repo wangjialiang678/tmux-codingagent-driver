@@ -14,6 +14,7 @@ from tcd.diagnostics import Warning as DiagnosticWarning, diagnose
 from tcd.event_log import emit
 from tcd.job import Job, JobManager, _now_iso
 from tcd.provider import get_provider
+from tcd.readiness import verify_prompt_delivery, wait_for_tui
 from tcd.tmux_adapter import TmuxAdapter, TmuxNotFoundError
 
 _MARKER_PROVIDERS = {"claude", "gemini"}
@@ -173,6 +174,11 @@ class TCD:
             if not self._tmux.send_text(job.tmux_session, wrapped):
                 raise TCDError("Failed to send prompt to tmux session")
             emit(job.id, "job.prompt_sent", bytes=len(wrapped.encode("utf-8")), req_id=req_id)
+
+            # Verify the prompt actually landed and resend if it was dropped
+            # (e.g. injected while the TUI was still initializing).
+            if getattr(prov, "verify_prompt_delivery", False):
+                self._verify_prompt_delivery(job, wrapped)
 
             return job
         except Exception as exc:
@@ -534,44 +540,16 @@ class TCD:
             self._mgr.save_job(job)
 
     def _wait_for_tui(self, job: Job, prov) -> tuple[bool, int, bool]:
-        """Wait for TUI to be ready, handling trust dialogs."""
-        indicator = prov.tui_ready_indicator
-        trust_handled = False
-        tui_ready = False
-        wait_started = time.time()
+        """Wait for the TUI to be ready (see :func:`tcd.readiness.wait_for_tui`)."""
+        return wait_for_tui(self._tmux, job.tmux_session, prov)
 
-        for _ in range(60):
-            time.sleep(0.5)
-            pane = self._tmux.capture_pane(job.tmux_session)
-            if pane is None:
-                continue
-
-            # Handle trust dialogs
-            trust_phrases = [
-                "Yes, I trust this folder",
-                "Enter to confirm",
-                "Do you trust the files in this folder",
-            ]
-            if any(phrase in pane for phrase in trust_phrases):
-                self._tmux.send_enter(job.tmux_session)
-                trust_handled = True
-                time.sleep(2)
-                continue
-
-            if trust_handled and "restarting" in pane.lower():
-                time.sleep(1)
-                continue
-
-            if indicator and indicator in pane:
-                if trust_handled:
-                    time.sleep(1)
-                tui_ready = True
-                break
-        else:
-            # Fallback
-            time.sleep(2)
-        elapsed_ms = int((time.time() - wait_started) * 1000)
-        return tui_ready, elapsed_ms, trust_handled
+    def _verify_prompt_delivery(
+        self, job: Job, prompt: str, *, retries: int = 2
+    ) -> bool:
+        """Confirm prompt delivery (see :func:`tcd.readiness.verify_prompt_delivery`)."""
+        return verify_prompt_delivery(
+            self._tmux, job.tmux_session, job.id, prompt, retries=retries
+        )
 
     @staticmethod
     def _advance_turn_if_needed(job: Job) -> None:
