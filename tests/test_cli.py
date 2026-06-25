@@ -10,6 +10,7 @@ import pytest
 
 from tcd.cli import cli
 from tcd.config import JOBS_DIR
+from tcd.event_log import load_events
 from tcd.job import Job, JobManager
 
 
@@ -115,6 +116,90 @@ def test_send_marks_failed_when_tmux_send_fails(runner, tmp_jobs, monkeypatch):
     assert updated.error == "failed to send message to tmux session"
 
 
+def test_send_retries_enter_when_claude_leaves_followup_queued(runner, tmp_jobs, monkeypatch):
+    job = _create_test_job(tmp_jobs, status="running", provider="claude")
+    job.turn_state = "idle"
+    JobManager().save_job(job)
+
+    class FakeTmux:
+        def __init__(self):
+            self.enter_count = 0
+
+        def check_tmux(self):
+            return None
+
+        def send_text(self, session, text):
+            return True
+
+        def capture_pane(self, session, **kwargs):
+            return "Press up to edit queued messages"
+
+        def send_enter(self, session):
+            self.enter_count += 1
+            return True
+
+    class FakeProvider:
+        def build_prompt_wrapper(self, message, req_id):
+            return message
+
+        def has_queued_message_notice(self, pane):
+            return "queued messages" in pane
+
+    fake_tmux = FakeTmux()
+    monkeypatch.setattr("tcd.cli._get_tmux", lambda: fake_tmux)
+    monkeypatch.setattr("tcd.cli.get_provider", lambda provider: FakeProvider())
+    monkeypatch.setattr("tcd.submission_recovery.time.sleep", lambda _seconds: None)
+
+    result = runner.invoke(cli, ["send", job.id, "follow up"])
+    assert result.exit_code == 0
+    assert fake_tmux.enter_count == 1
+
+    events = load_events(job.id, event_filter="job.message_submit_retry")
+    assert len(events) == 1
+    assert events[0]["reason"] == "queued_message_notice"
+    assert events[0]["success"] is True
+
+
+def test_send_does_not_retry_enter_without_queued_notice(runner, tmp_jobs, monkeypatch):
+    job = _create_test_job(tmp_jobs, status="running", provider="claude")
+    job.turn_state = "idle"
+    JobManager().save_job(job)
+
+    class FakeTmux:
+        def __init__(self):
+            self.enter_count = 0
+
+        def check_tmux(self):
+            return None
+
+        def send_text(self, session, text):
+            return True
+
+        def capture_pane(self, session, **kwargs):
+            return "Claude is responding normally"
+
+        def send_enter(self, session):
+            self.enter_count += 1
+            return True
+
+    class FakeProvider:
+        def build_prompt_wrapper(self, message, req_id):
+            return message
+
+        def has_queued_message_notice(self, pane):
+            return "queued messages" in pane
+
+    fake_tmux = FakeTmux()
+    monkeypatch.setattr("tcd.cli._get_tmux", lambda: fake_tmux)
+    monkeypatch.setattr("tcd.cli.get_provider", lambda provider: FakeProvider())
+    monkeypatch.setattr("tcd.submission_recovery.time.sleep", lambda _seconds: None)
+
+    result = runner.invoke(cli, ["send", job.id, "follow up"])
+    assert result.exit_code == 0
+    assert fake_tmux.enter_count == 0
+    assert load_events(job.id, event_filter="job.message_submit_retry") == []
+
+
 # ---------------------------------------------------------------------------
 # tcd --help
 # ---------------------------------------------------------------------------
@@ -179,6 +264,26 @@ def test_status_ok(runner, tmp_jobs):
     assert result.exit_code == 0
     assert job.id in result.output
     assert "completed" in result.output
+
+
+def test_status_running_idle_explains_turn_complete_not_job_complete(runner, tmp_jobs, monkeypatch):
+    job = _create_test_job(tmp_jobs, status="running", provider="claude")
+    job.turn_state = "idle"
+    JobManager().save_job(job)
+
+    class FakeTmux:
+        def check_tmux(self):
+            return None
+
+        def session_exists(self, name):
+            return True
+
+    monkeypatch.setattr("tcd.cli.TmuxAdapter", FakeTmux)
+
+    result = runner.invoke(cli, ["status", job.id])
+    assert result.exit_code == 0
+    assert "turn is complete" in result.output
+    assert "session is still running" in result.output
 
 
 def test_status_json(runner, tmp_jobs):
@@ -344,6 +449,25 @@ def test_output_from_log(runner, tmp_jobs):
     result = runner.invoke(cli, ["output", job.id])
     assert result.exit_code == 0
     assert "AI response text here" in result.output
+
+
+def test_output_running_idle_includes_debug_note(runner, tmp_jobs, monkeypatch):
+    job = _create_test_job(tmp_jobs, status="running", provider="claude")
+    job.turn_state = "idle"
+    JobManager().save_job(job)
+
+    class FakeCollector:
+        def collect(self, job):
+            return "AI response text here"
+
+    monkeypatch.setattr("tcd.cli.ResponseCollector", lambda: FakeCollector())
+
+    result = runner.invoke(cli, ["output", job.id])
+    combined_output = result.output + getattr(result, "stderr", "")
+    assert result.exit_code == 0
+    assert "AI response text here" in combined_output
+    assert "turn is complete" in combined_output
+    assert "output --full" in combined_output
 
 
 # ---------------------------------------------------------------------------

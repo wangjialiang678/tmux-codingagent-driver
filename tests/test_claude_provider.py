@@ -10,7 +10,7 @@ import pytest
 
 from tcd.job import Job
 from tcd.provider import get_provider
-from tcd.providers.claude import ClaudeProvider
+from tcd.providers.claude import ClaudeProvider, has_queued_message_notice
 
 
 @pytest.fixture()
@@ -56,6 +56,12 @@ def test_build_prompt_wrapper():
     assert "TCD_REQ:job1-0-123" in wrapped
     assert "do something" in wrapped
     assert "TCD_DONE:job1-0-123" in wrapped
+
+
+def test_has_queued_message_notice():
+    assert has_queued_message_notice("Press up to edit queued messages")
+    assert has_queued_message_notice("  press UP to edit queued message  ")
+    assert not has_queued_message_notice("Type your message")
 
 
 def test_detect_completion_signal_file(job: Job, tmp_path: Path):

@@ -15,6 +15,7 @@ from tcd.event_log import emit
 from tcd.job import Job, JobManager, _now_iso
 from tcd.provider import get_provider
 from tcd.readiness import verify_prompt_delivery, wait_for_tui
+from tcd.submission_recovery import retry_queued_message_submission
 from tcd.tmux_adapter import TmuxAdapter, TmuxNotFoundError
 
 _MARKER_PROVIDERS = {"claude", "gemini"}
@@ -381,6 +382,7 @@ class TCD:
             req_id=req_id,
             turn=job.turn_count,
         )
+        retry_queued_message_submission(self._tmux, job, prov, req_id)
 
         job.turn_state = "working"
         self._mgr.save_job(job)

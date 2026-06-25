@@ -9,7 +9,7 @@ tcd launches AI coding agents in detached tmux sessions, injects prompts, detect
 - **Multi-provider support**: Codex, Claude Code, Gemini CLI
 - **Git worktree isolation**: Parallel jobs in isolated worktrees with auto-merge
 - **Completion detection**: Signal files, marker protocol, idle detection (3-strategy fallback)
-- **Multi-turn conversations**: Send follow-up messages to running jobs
+- **Multi-turn conversations**: Send follow-up messages to running jobs, with Claude queued-submit recovery
 - **Incremental output**: `--tail` and `--since-line` for efficient polling
 - **Activity extraction**: Real-time activity lines from scrollback (Edited, Created, Ran, etc.)
 - **Event logging**: Append-only JSONL event log per job for full lifecycle tracing
@@ -67,6 +67,9 @@ tcd check <job_id> --json
 
 # Block until completion
 tcd wait <job_id> --timeout 300
+
+# For Claude/Gemini, exit 0 means the current turn is idle/complete.
+# The job can still be "running" because the tmux session stays alive for follow-ups.
 
 # Get the output (supports incremental polling)
 tcd output <job_id>
@@ -202,6 +205,10 @@ for job_id in [auth_job.id, api_job.id]:
 2. **Marker scan**: Scans tmux pane for `TCD_DONE:<req_id>` markers
 3. **Idle detection**: Compares consecutive pane captures; N seconds of no change = idle
 
+For marker providers (`claude`, `gemini`), `idle` means the current turn is complete. It does not mean the job is completed; the tmux session intentionally stays `running` so callers can use `tcd send` for follow-ups. If no `TCD_DONE` marker is visible, the idle fallback may still declare the turn done; use `tcd output --full` and `tcd log <job_id>` to inspect the pane history and events.
+
+Claude Code can occasionally leave a follow-up in its queued input state after `tcd send`, showing `Press up to edit queued messages`. When tcd detects that hint immediately after sending, it automatically sends one extra Enter and records `job.message_submit_retry` in the event log.
+
 ## Observability
 
 ### Event Log
@@ -252,7 +259,7 @@ Add to your project's `CLAUDE.md` for agent-to-agent delegation:
 When tasks can be delegated to another AI agent:
 
 1. Start a worker: `tcd start -p codex -m "Task description" -d /path/to/project`
-2. Poll for completion: `tcd check <job_id>` (0=idle, 1=working)
+2. Poll for turn completion: `tcd check <job_id>` (0=idle/turn complete, 1=working)
 3. Get results: `tcd output <job_id>`
 4. Send follow-ups: `tcd send <job_id> "Additional instructions"`
 ```

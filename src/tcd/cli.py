@@ -20,11 +20,17 @@ from tcd.readiness import verify_prompt_delivery, wait_for_tui
 from tcd.job import Job, JobManager, _now_iso
 from tcd.output_cleaner import clean_output
 from tcd.provider import get_provider, list_providers
+from tcd.submission_recovery import retry_queued_message_submission
 from tcd.tmux_adapter import TmuxAdapter, TmuxNotFoundError
 
 logger = logging.getLogger(__name__)
 
 _MARKER_PROVIDERS = {"claude", "gemini"}
+_RUNNING_IDLE_NOTE = (
+    "Note: this turn is complete, but the tmux session is still running for follow-ups. "
+    "For marker providers, idle can come from TCD_DONE or idle fallback; use `tcd output --full` "
+    "and `tcd log` if you need to verify the marker."
+)
 
 
 def _get_tmux() -> TmuxAdapter:
@@ -255,6 +261,9 @@ def status(job_id: str, as_json: bool):
     if as_json:
         d = job.to_dict()
         d["elapsed_seconds"] = _elapsed(job)
+        note = _running_idle_note(job)
+        if note:
+            d["state_note"] = note
         click.echo(json.dumps(d, indent=2, ensure_ascii=False))
     else:
         click.echo(f"ID:       {job.id}")
@@ -268,6 +277,9 @@ def status(job_id: str, as_json: bool):
         if job.total_tokens.get("input", 0) or job.total_tokens.get("output", 0):
             click.echo(f"Tokens:   in={job.total_tokens['input']} out={job.total_tokens['output']}")
         click.echo(f"Elapsed:  {_elapsed(job)}s")
+        note = _running_idle_note(job)
+        if note:
+            click.echo(note)
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +321,9 @@ def output(job_id: str, full: bool, raw: bool, tail: int | None, since_line: int
         # Print total line count to stderr for callers to track position
         if since_line is not None or tail is not None:
             click.echo(f"__lines_total={total}", err=True)
+        note = _running_idle_note(job)
+        if note:
+            click.echo(note, err=True)
     else:
         logger.debug("output %s: no output available", job_id)
         click.echo("(no output available)", err=True)
@@ -440,22 +455,21 @@ def check(job_id: str, as_json: bool):
             logger.exception("Failed to capture pane for diagnostics for job %s", job.id)
 
         diag_warnings = diagnose(job, pane_tail=pane_tail or None)
-        click.echo(
-            json.dumps(
-                {
-                    "state": state,
-                    "elapsed_s": _elapsed(job),
-                    "turn_count": job.turn_count,
-                    "warnings": [
-                        {"code": w.code, "severity": w.severity, "message": w.message}
-                        for w in diag_warnings
-                    ],
-                    "pane_tail": pane_tail,
-                    "activity": activity_lines,
-                },
-                ensure_ascii=False,
-            )
-        )
+        payload = {
+            "state": state,
+            "elapsed_s": _elapsed(job),
+            "turn_count": job.turn_count,
+            "warnings": [
+                {"code": w.code, "severity": w.severity, "message": w.message}
+                for w in diag_warnings
+            ],
+            "pane_tail": pane_tail,
+            "activity": activity_lines,
+        }
+        note = _running_idle_note(job)
+        if note:
+            payload["state_note"] = note
+        click.echo(json.dumps(payload, ensure_ascii=False))
 
     sys.exit(exit_code)
 
@@ -506,6 +520,9 @@ def wait(job_id: str, timeout: int):
                 _accumulate_tokens(job, result.tokens)
                 mgr.save_job(job)
                 emit(job.id, "job.turn_complete", turn=completed_turn, **({"tokens": result.tokens} if result.tokens else {}))
+                note = _running_idle_note(job)
+                if note:
+                    click.echo(note, err=True)
                 sys.exit(0)
             if result and result.state == "context_limit" and job.turn_state == "working":
                 completed_turn = job.turn_count
@@ -581,6 +598,7 @@ def send(job_id: str, message: str | None, file_path: str | None):
         req_id=req_id,
         turn=job.turn_count,
     )
+    retry_queued_message_submission(tmux, job, prov, req_id)
 
     # Update job
     job.turn_state = "working"
@@ -838,6 +856,13 @@ def _accumulate_tokens(job: Job, tokens: dict[str, int] | None) -> None:
     if tokens:
         job.total_tokens["input"] = job.total_tokens.get("input", 0) + tokens.get("input", 0)
         job.total_tokens["output"] = job.total_tokens.get("output", 0) + tokens.get("output", 0)
+
+
+def _running_idle_note(job: Job) -> str | None:
+    """Explain the marker-provider state where a turn is done but session remains alive."""
+    if job.provider in _MARKER_PROVIDERS and job.status == "running" and job.turn_state == "idle":
+        return _RUNNING_IDLE_NOTE
+    return None
 
 
 def _kill_job(job: Job, tmux: TmuxAdapter, mgr: JobManager) -> None:

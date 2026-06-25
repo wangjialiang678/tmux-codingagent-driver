@@ -367,6 +367,30 @@ class TestSend:
             req_id = prov.build_prompt_wrapper.call_args[0][1]
             assert req_id.startswith("test123-0-")
 
+    def test_send_retries_enter_for_claude_queued_notice(self, sdk, mock_tmux, monkeypatch):
+        job = Job(
+            id="test123", provider="claude", status="running",
+            prompt="test", cwd="/tmp", tmux_session="tcd-claude-test123",
+        )
+        sdk._mgr.load_job.return_value = job
+        mock_tmux.capture_pane.return_value = "Press up to edit queued messages"
+
+        class FakeProvider:
+            def build_prompt_wrapper(self, message, req_id):
+                return "wrapped"
+
+            def has_queued_message_notice(self, pane):
+                return "queued messages" in pane
+
+        monkeypatch.setattr("tcd.submission_recovery.time.sleep", lambda _seconds: None)
+        with patch("tcd.sdk.get_provider", return_value=FakeProvider()), \
+             patch("tcd.sdk.job_signal_path") as mock_signal:
+            mock_signal.return_value = MagicMock(unlink=MagicMock())
+            sdk.send("test123", "follow up")
+
+        mock_tmux.send_text.assert_called_once()
+        mock_tmux.send_enter.assert_called_once_with("tcd-claude-test123")
+
     def test_send_not_running(self, sdk):
         job = Job(
             id="test123", provider="codex", status="completed",

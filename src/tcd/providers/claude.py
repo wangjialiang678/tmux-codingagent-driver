@@ -21,6 +21,12 @@ logger = logging.getLogger(__name__)
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 IDLE_THRESHOLD = 20.0  # seconds
 MODEL_RE = re.compile(r"^[a-zA-Z0-9._:/-]+$")
+QUEUED_MESSAGE_RE = re.compile(r"press\s+up\s+to\s+edit\s+queued\s+messages?", re.IGNORECASE)
+
+
+def has_queued_message_notice(pane: str) -> bool:
+    """Return True when Claude Code reports a submitted prompt is still queued."""
+    return bool(QUEUED_MESSAGE_RE.search(pane))
 
 
 @register_provider
@@ -57,6 +63,10 @@ class ClaudeProvider(Provider):
     def build_prompt_wrapper(self, message: str, req_id: str) -> str:
         """Wrap with TCD_REQ/TCD_DONE markers."""
         return build_marker_prompt(message, req_id)
+
+    def has_queued_message_notice(self, pane: str) -> bool:
+        """Detect Claude Code's queued-message hint after follow-up submission."""
+        return has_queued_message_notice(pane)
 
     def detect_completion(self, job: Job) -> CompletionResult | None:
         """Check signal file → marker scan → idle detection."""
