@@ -66,6 +66,24 @@ surrounding lifecycle still had holes:
   substrings — an agent *writing* retry logic used to trip it — and is a
   warning rather than an error.
 
+### New: `tcd doctor`
+
+Every readiness and completion decision is a substring match against upstream
+TUI wording (`›`, `❯`, `Working (`, `esc to interrupt`, `Press up to edit
+queued messages`). When an upstream CLI changes its wording these fail
+*silently* — the job reports working forever or idle immediately, and the
+caller finds out at timeout. Nothing detected that drift.
+
+- `tcd doctor` — static checks: tmux and every provider CLI with versions, the
+  detection constants each provider is currently assuming, `~/.tcd`
+  writability, and a count of job records whose tmux session is gone.
+- `tcd doctor --live [--provider X]` — starts a disposable session per
+  provider and verifies the readiness indicator and prompt delivery still
+  hold, cleaning up the session and temp directory in a `finally`.
+- `--json` for orchestrators; exit 0/1/2 for pass/warning/error.
+
+Run it after upgrading Codex, Claude Code, or Gemini CLI.
+
 ### Job state is reconciled instead of assumed
 
 `tcd jobs` was reporting 54 `running` jobs against 9 live tmux sessions, the
@@ -96,7 +114,7 @@ oldest claiming 30 days of runtime.
 
 ### Tests
 
-312 passing (was 253), including the concurrency cases that prove job A's
+328 passing (was 253), including the concurrency cases that prove job A's
 stash survives job B's merge, that a repo lock actually serialises, and that
 PROVIDER_ERROR stays quiet while an agent writes retry logic.
 

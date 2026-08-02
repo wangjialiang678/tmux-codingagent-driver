@@ -845,7 +845,7 @@ the first review driven by how tcd behaved in sustained production use.
 | P2 | Claude session lookup returned the globally newest transcript — usually the orchestrator's own | **Fixed (2026-08-03)** |
 | P2 | `--provider` choices hardcoded despite an existing registry | **Fixed (2026-08-03)** |
 | P2 | Activity extraction filtered chrome with Codex-only prefixes for every provider | **Fixed (2026-08-03)** |
-| P3 | Detection strings are coupled to upstream CLI wording with no drift alarm | Open — `tcd doctor` proposed |
+| P3 | Detection strings are coupled to upstream CLI wording with no drift alarm | **Fixed (2026-08-03, `tcd doctor`)** |
 
 ---
 
@@ -1011,9 +1011,20 @@ a 50-line marker scan window. When an upstream CLI changes its wording these
 fail *silently* — the job reports working forever or idle immediately, and the
 caller only finds out at timeout.
 
-Proposed: `tcd doctor` — a smoke command that starts a throwaway session per
-provider and verifies the readiness indicator and prompt delivery still hold,
-so the assumptions can be re-validated after every upstream upgrade.
+**Fix**
+
+`tcd doctor` (implemented by Codex, driven through tcd itself). Static mode
+reports the detection constants each provider is assuming and flags job
+records whose tmux session is gone; `--live` starts a throwaway session per
+provider and verifies the readiness indicator and prompt delivery still hold.
+Run it after every upstream CLI upgrade.
+
+Two defects were found reviewing it on merge, both instances of patterns this
+report already names: the version probe only tried `--version` (tmux needs
+`-V`, so the dependency tcd relies on most was reported as unknown), and the
+live probe verified delivery with the default markers rather than the
+provider's own — the same duplicate-submission trap that per-provider markers
+exist to prevent.
 
 ---
 
