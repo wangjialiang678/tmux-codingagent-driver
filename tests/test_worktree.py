@@ -17,8 +17,11 @@ from tcd.worktree import (
     get_main_repo_root,
     get_repo_root,
     is_git_repo,
+    _stash_entries,
     find_stash_selector,
     merge_branch,
+    repo_lock,
+    stash_exists,
     remove_worktree,
     stash_pop,
     worktree_is_dirty,
@@ -316,3 +319,67 @@ def test_worktree_is_dirty_detects_uncommitted_work(git_repo: Path):
 
     remove_worktree(wt)
     assert not worktree_is_dirty(wt)
+
+
+def test_auto_stash_tags_the_entry_with_the_job_id(git_repo: Path):
+    _write_file(git_repo / "work.txt", "x\n")
+    ref = auto_stash(git_repo, "job42")
+    assert ref is not None
+
+    messages = [m for _, _, m in _stash_entries(git_repo)]
+    assert any("job42" in m for m in messages)
+
+
+def test_auto_stash_returns_none_when_nothing_was_stashed(git_repo: Path):
+    """A concurrent job can stash the same changes first.
+
+    `git stash push` then succeeds without creating an entry. Returning the
+    previous top here is how one job used to claim another job's stash.
+    """
+    _write_file(git_repo / "shared_work.txt", "x\n")
+    first = auto_stash(git_repo, "job_a")
+    assert first is not None
+
+    # Tree is clean now, exactly as job B would find it after job A's push.
+    assert auto_stash(git_repo, "job_b") is None
+    assert len(_stash_entries(git_repo)) == 1
+
+
+def test_find_stash_selector_honours_legacy_positional_refs(git_repo: Path):
+    """Pre-0.4.0 jobs persisted the literal 'stash@{0}'."""
+    _write_file(git_repo / "legacy.txt", "x\n")
+    auto_stash(git_repo, "old-job")
+
+    assert find_stash_selector(git_repo, "stash@{0}") == "stash@{0}"
+    assert find_stash_selector(git_repo, "stash@{7}") is None
+
+
+def test_stash_exists_tracks_manual_removal(git_repo: Path):
+    _write_file(git_repo / "manual.txt", "x\n")
+    ref = auto_stash(git_repo, "job1")
+    assert stash_exists(git_repo, ref)
+
+    _run_git(git_repo, "stash", "drop")
+    assert not stash_exists(git_repo, ref)
+
+
+def test_repo_lock_is_exclusive(git_repo: Path):
+    import threading
+
+    order: list[str] = []
+    second_entered = threading.Event()
+
+    def second():
+        with repo_lock(git_repo, timeout=5):
+            order.append("second")
+            second_entered.set()
+
+    with repo_lock(git_repo):
+        t = threading.Thread(target=second)
+        t.start()
+        # The second thread must not get in while the first holds the lock.
+        assert not second_entered.wait(timeout=0.5)
+        order.append("first")
+    t.join(timeout=5)
+
+    assert order == ["first", "second"]

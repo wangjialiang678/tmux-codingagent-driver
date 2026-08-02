@@ -150,6 +150,31 @@ class JobManager:
         jobs.sort(key=lambda j: j.created_at, reverse=True)
         return jobs
 
+    def held_resources(self) -> list[tuple[str, str]]:
+        """Jobs whose record is still the only pointer to a live resource.
+
+        Deleting these records orphans a worktree or a stash with no way left
+        to find them, so every cleanup path — CLI and SDK alike — consults this
+        rather than reimplementing the check.
+        """
+        from pathlib import Path
+
+        from tcd.worktree import stash_exists
+
+        held: list[tuple[str, str]] = []
+        for job in self.list_jobs():
+            if job.worktree_path and Path(job.worktree_path).exists():
+                held.append((job.id, f"worktree still at {job.worktree_path}"))
+                continue
+            if job.worktree_stash_ref and not job.worktree_stash_restored:
+                repo_root = job.worktree_repo_root
+                # A stash the user already popped or dropped by hand is not a
+                # reason to keep the record forever.
+                if repo_root and not stash_exists(repo_root, job.worktree_stash_ref):
+                    continue
+                held.append((job.id, f"auto-stash {job.worktree_stash_ref[:8]} not restored"))
+        return held
+
     def clean_jobs(self, *, include_running: bool = False, skip_ids: set[str] | None = None) -> int:
         """Remove completed/failed jobs and their associated files.
 

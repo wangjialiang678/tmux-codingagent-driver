@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -20,20 +21,44 @@ class CompletionResult:
     tokens: dict[str, int] | None = None
 
 
-# Pane substrings that mean the CLI hit a fatal provider-side error and will
-# make no progress: the agent looks "working" while burning the whole timeout.
-# Observed with Codex (bad model id -> 400; upstream 503 -> reconnect loop),
-# but the shapes are generic enough to be worth checking for every provider.
-_PROVIDER_ERROR_SIGNS: tuple[tuple[str, str], ...] = (
-    ("invalid_request_error", "provider rejected the request (check --model / credentials)"),
-    ("model requires", "the selected model is not available to this account"),
-    ("model_not_found", "the selected model does not exist"),
-    ("insufficient_quota", "the provider account is out of quota"),
-    ("authentication_error", "provider authentication failed"),
-    ("auth error:", "provider authentication failed"),
-    ("service unavailable", "the provider API is unavailable"),
-    ("internal_server_error", "the provider API returned an internal error"),
-    ("rate limit", "the provider is rate limiting this account"),
+# Patterns that mean the CLI hit a fatal provider-side error and will make no
+# progress: the agent looks "working" while burning the whole timeout. Observed
+# with Codex (bad model id -> 400; upstream 503 -> reconnect loop), but the
+# shapes are generic enough to check for every provider.
+#
+# These match the machine-emitted error envelopes, not prose. Plain substrings
+# like "rate limit" or "service unavailable" also appear when an agent is
+# *working on* retry logic or reading a log file, and a false PROVIDER_ERROR
+# telling the caller to kill a healthy job is worse than no warning at all.
+_PROVIDER_ERROR_SIGNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r'"type"\s*:\s*"invalid_request_error"'),
+        "provider rejected the request (check --model / credentials)",
+    ),
+    (
+        re.compile(r'"type"\s*:\s*"authentication_error"'),
+        "provider authentication failed",
+    ),
+    (
+        re.compile(r'"(?:code|type)"\s*:\s*"(?:model_not_found|insufficient_quota)"'),
+        "the selected model is unavailable to this account",
+    ),
+    (
+        re.compile(r"^\s*[■✗]?\s*unexpected status (5\d{2}|4\d{2})\b", re.MULTILINE),
+        "the provider API returned an error status",
+    ),
+    (
+        re.compile(r"^\s*auth error:\s*\d{3}\b", re.MULTILINE),
+        "provider authentication failed",
+    ),
+    (
+        re.compile(r"\bReconnecting\.\.\.\s*(\d+)/\1\b"),
+        "the provider connection is exhausted (final reconnect attempt)",
+    ),
+    (
+        re.compile(r"Model metadata for `[^`]+` not found"),
+        "the configured model id is not recognised by the provider",
+    ),
 )
 
 
@@ -58,6 +83,18 @@ class Provider(ABC):
     # resend if it was dropped. Verification is provider-agnostic (it looks for
     # the prompt echoed back), so it is on by default for the same reason.
     verify_prompt_delivery: bool = True
+    # Pane substrings proving a turn is running. Used as the second, more
+    # durable half of delivery verification: the echoed prompt scrolls away,
+    # this does not. Getting it wrong is worse than having no verification —
+    # a running turn reads as "prompt dropped" and the prompt is re-sent, so
+    # the task executes twice. The default carries every spelling seen in the
+    # wild; a provider should narrow it only against its actual TUI.
+    working_markers: tuple[str, ...] = (
+        "esc to interrupt",
+        "esc to cancel",
+        "tokens used",
+        "working (",
+    )
     # Whether `--sandbox` means anything to this CLI. When False, tcd rejects
     # the flag instead of accepting it and silently dropping it.
     supports_sandbox: bool = False
@@ -69,9 +106,8 @@ class Provider(ABC):
         caller does not wait out a 60-minute timeout on a job that cannot make
         progress.
         """
-        low = pane.lower()
-        for needle, reason in _PROVIDER_ERROR_SIGNS:
-            if needle in low:
+        for pattern, reason in _PROVIDER_ERROR_SIGNS:
+            if pattern.search(pane):
                 return reason
         return None
 

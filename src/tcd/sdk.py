@@ -14,7 +14,7 @@ from tcd.diagnostics import Warning as DiagnosticWarning, diagnose
 from tcd.event_log import emit
 from tcd.job import Job, JobManager, _now_iso
 from tcd.provider import get_provider
-from tcd.readiness import verify_prompt_delivery, wait_for_tui
+from tcd.readiness import WORKING_MARKERS, verify_prompt_delivery, wait_for_tui
 from tcd.submission_recovery import retry_queued_message_submission
 from tcd.tmux_adapter import TmuxAdapter, TmuxNotFoundError
 
@@ -565,13 +565,19 @@ class TCD:
                 logger.warning("kill %s: worktree cleanup failed", job.id, exc_info=True)
         emit(job.id, "job.killed", reason="user")
 
-    def clean(self, *, include_running: bool = False) -> int:
+    def clean(self, *, include_running: bool = False, force: bool = False) -> int:
         """Clean completed/failed jobs.
+
+        Jobs still holding a worktree or an unrestored stash are skipped unless
+        *force*, matching `tcd clean`. Without this the SDK was a back door
+        around the CLI's protection: the same call deleted the only record of
+        where those resources live.
 
         Returns:
             Number of jobs cleaned.
         """
-        return self._mgr.clean_jobs(include_running=include_running)
+        skip_ids = set() if force else {job_id for job_id, _ in self._mgr.held_resources()}
+        return self._mgr.clean_jobs(include_running=include_running, skip_ids=skip_ids)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -598,8 +604,13 @@ class TCD:
         self, job: Job, prompt: str, *, retries: int = 2
     ) -> bool:
         """Confirm prompt delivery (see :func:`tcd.readiness.verify_prompt_delivery`)."""
+        markers = WORKING_MARKERS
+        try:
+            markers = get_provider(job.provider).working_markers
+        except Exception:
+            logger.debug("could not resolve working markers for %s", job.provider, exc_info=True)
         return verify_prompt_delivery(
-            self._tmux, job.tmux_session, job.id, prompt, retries=retries
+            self._tmux, job.tmux_session, job.id, prompt, retries=retries, markers=markers
         )
 
     @staticmethod

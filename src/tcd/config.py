@@ -6,6 +6,7 @@ from pathlib import Path
 
 TCD_HOME = Path.home() / ".tcd"
 JOBS_DIR = TCD_HOME / "jobs"
+LOCKS_DIR = TCD_HOME / "locks"
 LOG_FILE = TCD_HOME / "tcd.log"
 
 DEFAULT_TIMEOUT_MINUTES = 60
@@ -15,6 +16,15 @@ TMUX_SESSION_PREFIX = "tcd"
 def ensure_dirs() -> None:
     """Create required directories if they don't exist."""
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    LOCKS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def repo_lock_path(repo_path: str | Path) -> Path:
+    """Lock file guarding one repo's stash stack against concurrent jobs."""
+    import hashlib
+
+    digest = hashlib.sha256(str(Path(repo_path).resolve()).encode()).hexdigest()[:16]
+    return LOCKS_DIR / f"repo-{digest}.lock"
 
 
 def job_json_path(job_id: str) -> Path:

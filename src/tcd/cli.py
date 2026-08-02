@@ -18,7 +18,7 @@ from tcd.collector import ResponseCollector
 from tcd.config import ensure_dirs, job_signal_path
 from tcd.diagnostics import Warning as DiagnosticWarning, diagnose
 from tcd.event_log import emit, load_events
-from tcd.readiness import verify_prompt_delivery, wait_for_tui
+from tcd.readiness import WORKING_MARKERS, verify_prompt_delivery, wait_for_tui
 from tcd.job import Job, JobManager, _now_iso
 from tcd.output_cleaner import clean_output
 from tcd.provider import get_provider, list_providers
@@ -128,21 +128,11 @@ def start(
             click.echo(f"Error: {e}", err=True)
             sys.exit(1)
 
-    stash_ref = None
     if worktree:
-        from tcd.worktree import WorktreeError, auto_stash, is_git_repo
+        from tcd.worktree import is_git_repo
 
         if not is_git_repo(cwd):
             click.echo("Error: cwd is not a git repository.", err=True)
-            sys.exit(1)
-
-        try:
-            stash_ref = auto_stash(cwd)
-            if stash_ref:
-                click.echo(f"Stashed uncommitted changes ({stash_ref[:8]}).")
-                logger.info("start: auto-stashed dirty state, ref=%s", stash_ref)
-        except WorktreeError as e:
-            click.echo(f"Error: {e}", err=True)
             sys.exit(1)
 
     # Create job
@@ -151,22 +141,44 @@ def start(
     logger.info("start %s: provider=%s cwd=%s sandbox=%s worktree=%s", job.id, provider, cwd, sandbox, worktree)
 
     if worktree:
-        from tcd.worktree import create_worktree
+        from tcd.worktree import WorktreeError, auto_stash, create_worktree
 
-        name = wt_name or job.id
+        # The job record is created first so the stash ref can be persisted the
+        # moment the stash exists. Stashing before the job existed meant any
+        # failure in between (a name collision on the worktree, for instance)
+        # left the user's changes stashed with nothing pointing at them.
+        repo_root = cwd
         try:
-            wt_path = create_worktree(cwd, name)
+            stash_ref = auto_stash(repo_root, job.id)
         except WorktreeError as e:
             click.echo(f"Error: {e}", err=True)
             sys.exit(1)
 
-        job.worktree_repo_root = cwd
+        if stash_ref:
+            job.worktree_stash_ref = stash_ref
+            job.worktree_repo_root = repo_root
+            mgr.save_job(job)
+            click.echo(f"Stashed uncommitted changes ({stash_ref[:8]}).")
+            logger.info("start %s: auto-stashed dirty state, ref=%s", job.id, stash_ref)
+            emit(job.id, "job.stashed", ref=stash_ref)
+
+        name = wt_name or job.id
+        try:
+            wt_path = create_worktree(repo_root, name)
+        except WorktreeError as e:
+            click.echo(f"Error: {e}", err=True)
+            _restore_auto_stash(job, repo_root, mgr)
+            job.status = "failed"
+            job.error = f"worktree creation failed: {e}"
+            job.completed_at = _now_iso()
+            mgr.save_job(job)
+            sys.exit(1)
+
+        job.worktree_repo_root = repo_root
         cwd = str(wt_path)
         job.cwd = cwd
         job.worktree_path = cwd
         job.worktree_branch = f"tcd/{name}"
-        if stash_ref:
-            job.worktree_stash_ref = stash_ref
         mgr.save_job(job)
         logger.info("start %s: worktree created at %s branch=tcd/%s", job.id, cwd, name)
         emit(job.id, "job.worktree_created", worktree_path=cwd, branch=f"tcd/{name}")
@@ -214,7 +226,13 @@ def start(
         # Verify the prompt actually landed and resend if it was dropped (e.g.
         # injected while a slow TUI was still initializing).
         if getattr(prov, "verify_prompt_delivery", False):
-            verify_prompt_delivery(tmux, job.tmux_session, job.id, wrapped)
+            verify_prompt_delivery(
+                tmux,
+                job.tmux_session,
+                job.id,
+                wrapped,
+                markers=getattr(prov, "working_markers", WORKING_MARKERS),
+            )
 
         click.echo(f"Job started: {job.id}")
         click.echo(f"Provider: {provider}")
@@ -232,8 +250,6 @@ def start(
 
         if job.worktree_path and job.worktree_branch:
             try:
-                from pathlib import Path
-
                 from tcd.worktree import delete_branch, get_main_repo_root, remove_worktree
 
                 repo_root = Path(job.worktree_repo_root) if job.worktree_repo_root else get_main_repo_root(job.cwd)
@@ -247,6 +263,10 @@ def start(
                     mgr.save_job(job)
                 else:
                     logger.warning("start %s: worktree removal failed during rollback, skipping branch cleanup", job.id)
+                # The launch failed, so nothing will ever merge this job — give
+                # the caller their stashed changes back rather than leaving them
+                # on the stack with a dead job pointing at them.
+                _restore_auto_stash(job, repo_root, mgr)
             except Exception:
                 logger.warning("start %s: failed to rollback worktree setup", job.id, exc_info=True)
 
@@ -475,8 +495,8 @@ def check(job_id: str, as_json: bool):
             diag_warnings.append(
                 DiagnosticWarning(
                     code="PROVIDER_ERROR",
-                    message=f"{provider_error} — the agent cannot make progress; kill and restart",
-                    severity="error",
+                    message=f"{provider_error} — check the pane before acting; if it is stuck, kill and restart",
+                    severity="warn",
                 )
             )
         payload = {
@@ -864,25 +884,31 @@ def clean(clean_all: bool, force: bool):
     written down, so jobs still holding either are skipped unless --force.
     """
     mgr = JobManager()
+    held = mgr.held_resources()
 
-    skipped: list[tuple[str, str]] = []
-    if not force:
-        for job in mgr.list_jobs():
-            reason = None
-            if job.worktree_path and Path(job.worktree_path).exists():
-                reason = f"worktree still at {job.worktree_path}"
-            elif job.worktree_stash_ref and not job.worktree_stash_restored:
-                reason = f"auto-stash {job.worktree_stash_ref[:8]} not restored"
-            if reason:
-                skipped.append((job.id, reason))
-
-    count = mgr.clean_jobs(include_running=clean_all, skip_ids={j for j, _ in skipped})
-    click.echo(f"Cleaned {count} job(s).")
-    if skipped:
-        click.echo(f"Kept {len(skipped)} job(s) that still own resources:", err=True)
-        for job_id, reason in skipped:
+    if force and held:
+        # --force deletes the only record of these paths, so print them first:
+        # afterwards nothing in tcd can find them again.
+        click.echo(f"Orphaning resources held by {len(held)} job(s):", err=True)
+        for job_id, reason in held:
             click.echo(f"  {job_id}: {reason}", err=True)
-        click.echo("Resolve with `tcd merge <id>` / `tcd kill <id>`, or re-run with --force.", err=True)
+        click.echo("Clean these up by hand with `git worktree list` / `git stash list`.", err=True)
+
+    count = mgr.clean_jobs(
+        include_running=clean_all,
+        skip_ids=set() if force else {job_id for job_id, _ in held},
+    )
+    click.echo(f"Cleaned {count} job(s).")
+    if held and not force:
+        click.echo(f"Kept {len(held)} job(s) that still own resources:", err=True)
+        for job_id, reason in held:
+            click.echo(f"  {job_id}: {reason}", err=True)
+        click.echo(
+            "Finish them first — `tcd merge <id>` to keep the work, or "
+            "`tcd kill <id> --force` to discard it. `tcd clean --force` deletes "
+            "the record without releasing the resource.",
+            err=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1003,10 +1029,11 @@ def _kill_job(job: Job, tmux: TmuxAdapter, mgr: JobManager, *, force: bool = Fal
     job.error = "killed by user"
     job.completed_at = _now_iso()
     mgr.save_job(job)
-    if job.worktree_path:
+    # Not gated on worktree_path: a merge that cleaned the worktree but failed
+    # to pop the stash (conflict) leaves the job with a stash and no worktree,
+    # and kill is then the only place left to retry the restore.
+    if job.worktree_path or (job.worktree_stash_ref and not job.worktree_stash_restored):
         try:
-            from pathlib import Path
-
             from tcd.worktree import delete_branch, get_main_repo_root, remove_worktree
 
             repo_root = Path(job.worktree_repo_root) if job.worktree_repo_root else get_main_repo_root(job.cwd)
@@ -1014,8 +1041,12 @@ def _kill_job(job: Job, tmux: TmuxAdapter, mgr: JobManager, *, force: bool = Fal
             # `git worktree remove --force` throws away whatever the agent had
             # not committed, and agents forgetting to commit is a known failure
             # mode — so check before destroying anything.
-            blocker = None if force else _worktree_has_unsaved_work(job, repo_root)
-            if blocker:
+            blocker = None
+            if job.worktree_path and not force:
+                blocker = _worktree_has_unsaved_work(job, repo_root)
+            if not job.worktree_path:
+                pass  # nothing to clean up; fall through to the stash restore
+            elif blocker:
                 click.echo(f"Kept worktree: {blocker}.", err=True)
                 click.echo(f"  worktree: {job.worktree_path}", err=True)
                 if job.worktree_branch:

@@ -99,7 +99,13 @@ def wait_for_tui(tmux, session: str, prov) -> tuple[bool, int, bool]:
 
 
 def verify_prompt_delivery(
-    tmux, session: str, job_id: str, sent_text: str, *, retries: int = 2
+    tmux,
+    session: str,
+    job_id: str,
+    sent_text: str,
+    *,
+    retries: int = 2,
+    markers: tuple[str, ...] = WORKING_MARKERS,
 ) -> bool:
     """Confirm the agent received the prompt; resend if it was dropped.
 
@@ -107,6 +113,11 @@ def verify_prompt_delivery(
     prompt echoed back, or a 'turn running' marker. If neither shows up within
     a few seconds the keystrokes were likely swallowed during TUI init — resend
     (up to ``retries`` times). Returns whether delivery was confirmed.
+
+    *markers* must match the provider's own TUI (``prov.working_markers``).
+    Markers that never match turn this guard into a duplicate-submission bug:
+    a turn that is running fine looks dropped, so the prompt is re-sent and the
+    task runs more than once.
     """
     snippet = ""
     for line in sent_text.splitlines():
@@ -124,7 +135,7 @@ def verify_prompt_delivery(
             pane_low = pane.lower()
             if snippet and snippet in pane:
                 return True
-            if any(m in pane_low for m in WORKING_MARKERS):
+            if any(m in pane_low for m in markers):
                 return True
         return False
 

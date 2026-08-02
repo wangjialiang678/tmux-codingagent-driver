@@ -31,6 +31,12 @@ class GeminiProvider(Provider):
     name = "gemini"
     cli_command = "gemini"
     tui_ready_indicator = "Type your message"
+    # Gemini says "esc to cancel" where Codex says "esc to interrupt" (verified
+    # against the installed bundle: 4 occurrences of the former, 0 of the
+    # latter). Delivery verification that only knew the Codex spelling would
+    # read a running turn as a dropped prompt and re-send it, running the task
+    # up to three times.
+    working_markers = ("esc to cancel", "tokens used")
 
     def check_cli(self) -> None:
         if shutil.which(self.cli_command) is None:

@@ -656,3 +656,46 @@ def test_start_provider_choices_come_from_the_registry(runner):
     assert result.exit_code == 0
     for name in list_providers():
         assert name in result.output
+
+
+def test_clean_releases_jobs_whose_stash_was_removed_by_hand(runner, tmp_jobs, monkeypatch):
+    """A stash the user already popped must not pin the record forever."""
+    job = _create_test_job(tmp_jobs, status="failed")
+    job.worktree_stash_ref = "abc123def456"
+    job.worktree_repo_root = "/repo"
+    JobManager().save_job(job)
+
+    monkeypatch.setattr("tcd.worktree.stash_exists", lambda _root, _ref: False)
+
+    result = runner.invoke(cli, ["clean"])
+    assert result.exit_code == 0
+    assert JobManager().load_job(job.id) is None
+
+
+def test_clean_force_lists_what_it_orphans(runner, tmp_jobs, monkeypatch):
+    job = _create_test_job(tmp_jobs, status="failed")
+    job.worktree_stash_ref = "abc123def456"
+    job.worktree_repo_root = "/repo"
+    JobManager().save_job(job)
+
+    monkeypatch.setattr("tcd.worktree.stash_exists", lambda _root, _ref: True)
+
+    result = runner.invoke(cli, ["clean", "--force"])
+    assert result.exit_code == 0
+    assert "Orphaning resources" in result.output
+    assert "abc123de" in result.output
+    assert JobManager().load_job(job.id) is None
+
+
+def test_clean_guidance_does_not_point_at_force(runner, tmp_jobs, monkeypatch):
+    """`clean --force` drops the record without releasing the resource."""
+    job = _create_test_job(tmp_jobs, status="failed")
+    job.worktree_stash_ref = "abc123def456"
+    job.worktree_repo_root = "/repo"
+    JobManager().save_job(job)
+
+    monkeypatch.setattr("tcd.worktree.stash_exists", lambda _root, _ref: True)
+
+    result = runner.invoke(cli, ["clean"])
+    assert "tcd merge" in result.output
+    assert "tcd kill" in result.output
