@@ -7,13 +7,14 @@ tcd launches AI coding agents in detached tmux sessions, injects prompts, detect
 ## Features
 
 - **Multi-provider support**: Codex, Claude Code, Gemini CLI
-- **Git worktree isolation**: Parallel jobs in isolated worktrees with auto-merge
+- **Git worktree isolation**: Parallel jobs in isolated worktrees with auto-merge; uncommitted changes are stashed per job and restored on every exit path
 - **Completion detection**: Signal files, marker protocol, idle detection (3-strategy fallback)
 - **Multi-turn conversations**: Send follow-up messages to running jobs, with Claude queued-submit recovery
 - **Incremental output**: `--tail` and `--since-line` for efficient polling
 - **Activity extraction**: Real-time activity lines from scrollback (Edited, Created, Ran, etc.)
 - **Event logging**: Append-only JSONL event log per job for full lifecycle tracing
-- **Diagnostics**: Rule-based health checks (sandbox mismatch, stall, permission errors, stuck turns)
+- **Diagnostics**: Rule-based health checks (sandbox mismatch, stall, permission errors, stuck turns, fatal provider API errors)
+- **Drift detection**: `tcd doctor` re-verifies the pane strings tcd matches on, which upstream CLI upgrades break silently
 - **Token tracking**: Cumulative token usage recording (Codex)
 - **Verbose logging**: `-v`/`-vv` for INFO/DEBUG level diagnostics
 - **Python SDK**: Programmatic access for agent orchestration
@@ -86,11 +87,20 @@ tcd merge <job_id> --squash
 # List all jobs
 tcd jobs
 
-# Kill a job
+# Kill a job. A worktree still holding uncommitted changes or unmerged
+# commits is kept, with its path printed — `--force` discards it.
 tcd kill <job_id>
+tcd kill <job_id> --force
 
-# Clean up finished jobs
+# Clean up finished jobs. Jobs still owning a worktree or an unrestored
+# auto-stash are skipped, because the job record is the only pointer to them.
 tcd clean
+
+# Check that the pane strings tcd matches on still hold. Run after upgrading
+# Codex / Claude Code / Gemini CLI — when their TUI wording changes, detection
+# fails silently rather than loudly.
+tcd doctor
+tcd doctor --live --provider codex
 
 # Enable verbose logging
 tcd -v start -p codex -m "..." -d .    # INFO level
@@ -155,10 +165,11 @@ for job_id in [auth_job.id, api_job.id]:
 | `tcd output <job_id> [--full] [--raw] [--tail N] [--since-line N]` | Get job output |
 | `tcd send <job_id> <message>` | Send follow-up message |
 | `tcd merge <job_id> [--squash] [--no-cleanup]` | Merge worktree branch back to main |
-| `tcd jobs [--status S] [--json]` | List all jobs |
+| `tcd jobs [--status S] [--json] [--no-reconcile]` | List all jobs (reconciles records against live tmux sessions first) |
 | `tcd attach <job_id>` | Attach to tmux session (debugging) |
-| `tcd kill <job_id> [--all]` | Kill running job(s) |
-| `tcd clean [--all]` | Clean finished jobs |
+| `tcd kill <job_id> [--all] [--force]` | Kill running job(s); keeps a worktree holding unsaved work unless `--force` |
+| `tcd clean [--all] [--force]` | Clean finished jobs; skips jobs still owning a worktree or stash unless `--force` |
+| `tcd doctor [--live] [--provider P] [--timeout N] [--json]` | Check that tcd's provider detection assumptions still hold |
 
 ### Start Options
 
@@ -258,10 +269,17 @@ Add to your project's `CLAUDE.md` for agent-to-agent delegation:
 
 When tasks can be delegated to another AI agent:
 
-1. Start a worker: `tcd start -p codex -m "Task description" -d /path/to/project`
+1. Start a worker: `tcd start -p codex -m - -d /path/to/project < prompt.txt`
+   (stdin avoids shell-escaping breakage on prompts containing quotes)
 2. Poll for turn completion: `tcd check <job_id>` (0=idle/turn complete, 1=working)
 3. Get results: `tcd output <job_id>`
 4. Send follow-ups: `tcd send <job_id> "Additional instructions"`
+5. Release the session when done: `tcd kill <job_id>` — it stays alive for
+   follow-ups until killed
+
+Turn idle is not task complete: agents spawn their own sub-agents and can go
+idle mid-task. Verify against the deliverables you asked for, and use `tcd send`
+to resume the same session rather than starting over.
 ```
 
 ## Development
