@@ -8,6 +8,7 @@ from click.testing import CliRunner
 
 import pytest
 
+from tcd import __version__
 from tcd.cli import cli
 from tcd.config import JOBS_DIR
 from tcd.event_log import load_events
@@ -17,6 +18,21 @@ from tcd.job import Job, JobManager
 @pytest.fixture()
 def runner():
     return CliRunner()
+
+
+def test_version_flag_reports_package_version(runner):
+    """`tcd --version` must exist and agree with the packaged version.
+
+    Both spellings are checked because `-v` is verbosity, not version.
+    """
+    from importlib.metadata import version as pkg_version
+
+    for flag in ("--version", "-V"):
+        result = runner.invoke(cli, [flag])
+        assert result.exit_code == 0
+        assert __version__ in result.output
+
+    assert pkg_version("tcd") == __version__
 
 
 @pytest.fixture()

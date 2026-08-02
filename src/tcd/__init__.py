@@ -1,6 +1,6 @@
 """tmux-codingagent-driver: Drive AI CLI tools via tmux."""
 
-__version__ = "0.1.0"
+__version__ = "0.3.3"
 
 # Auto-register providers on import
 import tcd.providers.codex  # noqa: F401

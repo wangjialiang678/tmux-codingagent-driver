@@ -12,6 +12,7 @@ import time
 
 import click
 
+from tcd import __version__
 from tcd.collector import ResponseCollector
 from tcd.config import ensure_dirs, job_signal_path
 from tcd.diagnostics import diagnose
@@ -44,6 +45,7 @@ def _get_tmux() -> TmuxAdapter:
 
 
 @click.group()
+@click.version_option(__version__, "-V", "--version", prog_name="tcd")
 @click.option("-v", "--verbose", count=True, help="Increase verbosity (-v=INFO, -vv=DEBUG).")
 def cli(verbose: int):
     """tcd — tmux-codingagent-driver: Drive AI CLI tools via tmux."""

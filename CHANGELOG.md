@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.3.3 — 2026-08-02
+
+Follow-up submission hardening, plus a real version number.
+
+### `tcd send` no longer silently leaves the follow-up queued
+
+- Claude Code can accept pasted text but leave it in its queued input state
+  after the first Enter, showing `Press up to edit queued messages` — the
+  follow-up looked delivered but the agent never saw it. New
+  `tcd/submission_recovery.py` inspects the pane right after a send, and when
+  the provider reports the queued-message hint (providers opt in via
+  `has_queued_message_notice(pane)`), sends one extra Enter and records
+  `job.message_submit_retry` in the event log.
+- README now states plainly that for marker providers (`claude`, `gemini`)
+  `tcd check` exit 0 means **the current turn is idle**, not that the job is
+  finished — the tmux session deliberately stays `running` for follow-ups.
+
+### Version is now reported and single-sourced
+
+- `tcd --version` / `tcd -V` exists (`-v` remains verbosity).
+- The version lives in `src/tcd/__init__.py` and `pyproject.toml` reads it via
+  `[tool.hatch.version]`, so the two can no longer drift. Previously both said
+  `0.1.0` while the docs and changelog were on `0.3.x`, and the only way to tell
+  which build you had installed was `git log`.
+
+---
+
 ## v0.3.2 — 2026-06-20
 
 Codex launch reliability fixes. Every tcd-driven Codex job in a fresh directory
