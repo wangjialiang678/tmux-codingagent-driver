@@ -89,15 +89,71 @@ def auto_stash(repo_path: str | Path, message: str = "tcd: auto-stash before wor
     return ref_result.stdout.strip() or "stash@{0}"
 
 
-def stash_pop(repo_path: str | Path) -> bool:
-    """Pop the most recent stash. Returns True on success."""
+def find_stash_selector(repo_path: str | Path, ref: str) -> str | None:
+    """Resolve a stash commit SHA to its current ``stash@{n}`` selector.
+
+    Stash selectors are positional, so they shift whenever any stash is pushed
+    or popped. Parallel worktree jobs each push their own stash, so the ref
+    recorded at ``tcd start`` time must be re-resolved right before popping.
+    Returns None if the stash is no longer on the stack.
+    """
+    if not ref:
+        return None
     result = subprocess.run(
-        ["git", "stash", "pop"],
+        ["git", "stash", "list", "--format=%H %gd"],
         cwd=str(repo_path),
         capture_output=True,
         text=True,
     )
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        sha, _, selector = line.strip().partition(" ")
+        if sha == ref and selector:
+            return selector
+    return None
+
+
+def stash_pop(repo_path: str | Path, ref: str | None = None) -> bool:
+    """Restore a stash. Returns True on success.
+
+    With *ref* (a stash commit SHA, as recorded by :func:`auto_stash`) the exact
+    stash is resolved and popped. Popping the top of the stack instead would
+    hand job A's stash to job B whenever two worktree jobs overlap — the stack
+    is shared by the whole repo, not per job.
+
+    Without *ref* this falls back to popping the top, which is only correct for
+    jobs created before the ref was recorded.
+    """
+    args = ["git", "stash", "pop"]
+    if ref:
+        selector = find_stash_selector(repo_path, ref)
+        if selector is None:
+            logger.warning("stash %s no longer on the stack in %s", ref[:8], repo_path)
+            return False
+        args.append(selector)
+
+    result = subprocess.run(
+        args,
+        cwd=str(repo_path),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        logger.warning("git stash pop failed: %s", result.stderr.strip())
     return result.returncode == 0
+
+
+def worktree_is_dirty(worktree_path: str | Path) -> bool:
+    """Whether a worktree has uncommitted changes the agent would lose."""
+    wt = Path(worktree_path)
+    if not wt.exists():
+        return False
+    try:
+        return is_dirty(wt)
+    except Exception:
+        # If we cannot tell, assume there is something to protect.
+        return True
 
 
 def create_worktree(repo_path: str | Path, branch_name: str) -> Path:

@@ -66,3 +66,61 @@ def test_completion_result():
     r = CompletionResult(state="idle", last_agent_message="done")
     assert r.state == "idle"
     assert r.last_agent_message == "done"
+
+
+# ---------------------------------------------------------------------------
+# Fatal provider-side errors
+#
+# A bad model id or an upstream outage leaves the CLI printing errors while
+# tcd reports state="working" — burning the whole timeout on a job that cannot
+# make progress. Real panes observed in production are used as fixtures.
+# ---------------------------------------------------------------------------
+
+BAD_MODEL_PANE = (
+    "⚠ Model metadata for `gpt-5.6-luna` not found. Defaulting to fallback metadata;\n"
+    '■ {"type":"error","status":400,"error":\n'
+    '{"type":"invalid_request_error","message":"The \'gpt-5.6-luna\' model requires a\n'
+)
+
+OUTAGE_PANE = (
+    "■ unexpected status 503 Service Unavailable: Service Unavailable, url:\n"
+    "https://chatgpt.com/backend-api/codex/responses, cf-ray: a20a139efd20d43a-SIN,\n"
+    "auth error: 503, auth error code: biscuit_baker_service_me_circuit_open\n"
+    "• Reconnecting... 5/5 (47s • esc to interrupt)\n"
+)
+
+HEALTHY_PANE = (
+    "• Edited src/tcd/worktree.py (+80 lines)\n"
+    "• Ran uv run pytest tests/test_worktree.py -v\n"
+    "12 passed in 4.46s\n"
+    "• Working (2m 18s • esc to interrupt)\n"
+)
+
+
+@pytest.mark.parametrize("provider_name", ["codex", "claude", "gemini"])
+@pytest.mark.parametrize("pane", [BAD_MODEL_PANE, OUTAGE_PANE], ids=["bad-model", "outage"])
+def test_detect_provider_error_flags_fatal_panes(provider_name, pane):
+    """Every provider gets the check, not just the one it was found on."""
+    assert get_provider(provider_name).detect_provider_error(pane) is not None
+
+
+@pytest.mark.parametrize("provider_name", ["codex", "claude", "gemini"])
+def test_detect_provider_error_ignores_healthy_pane(provider_name):
+    assert get_provider(provider_name).detect_provider_error(HEALTHY_PANE) is None
+
+
+# ---------------------------------------------------------------------------
+# Launch hardening is a base-class default, not a per-provider rediscovery
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("provider_name", ["codex", "claude", "gemini"])
+def test_providers_inherit_prompt_delivery_hardening(provider_name):
+    prov = get_provider(provider_name)
+    assert prov.tui_stable_secs > 0, "TUI readiness race is unguarded"
+    assert prov.verify_prompt_delivery is True, "dropped prompts go undetected"
+
+
+def test_only_codex_claims_sandbox_support():
+    assert get_provider("codex").supports_sandbox is True
+    assert get_provider("claude").supports_sandbox is False
+    assert get_provider("gemini").supports_sandbox is False

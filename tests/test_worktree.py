@@ -11,13 +11,17 @@ import pytest
 
 from tcd.worktree import (
     WorktreeError,
+    auto_stash,
     create_worktree,
     delete_branch,
     get_main_repo_root,
     get_repo_root,
     is_git_repo,
+    find_stash_selector,
     merge_branch,
     remove_worktree,
+    stash_pop,
+    worktree_is_dirty,
 )
 
 
@@ -249,3 +253,66 @@ def test_e2e_worktree_squash_merge_and_force_delete(git_repo: Path):
     # Verify files
     assert (git_repo / "squash_file.txt").read_text(encoding="utf-8") == "squash content\n"
     assert (git_repo / "squash_file2.txt").read_text(encoding="utf-8") == "squash content 2\n"
+
+
+# ---------------------------------------------------------------------------
+# Auto-stash identity
+#
+# The stash stack is repo-wide, so parallel worktree jobs interleave on it.
+# Popping "the top" hands one job's changes to another job's merge.
+# ---------------------------------------------------------------------------
+
+def test_stash_pop_by_ref_targets_the_right_stash(git_repo: Path):
+    _write_file(git_repo / "job_a.txt", "job A work\n")
+    ref_a = auto_stash(git_repo, "tcd: auto-stash before worktree")
+    assert ref_a is not None
+
+    _write_file(git_repo / "job_b.txt", "job B work\n")
+    ref_b = auto_stash(git_repo, "tcd: auto-stash before worktree")
+    assert ref_b is not None and ref_b != ref_a
+
+    # Job A finishes first; its stash is no longer at the top of the stack.
+    assert stash_pop(git_repo, ref_a)
+    assert (git_repo / "job_a.txt").exists()
+    assert not (git_repo / "job_b.txt").exists()
+
+    # Job B's stash is untouched and still restorable.
+    assert stash_pop(git_repo, ref_b)
+    assert (git_repo / "job_b.txt").exists()
+
+
+def test_stash_pop_by_ref_reports_missing_stash(git_repo: Path):
+    _write_file(git_repo / "gone.txt", "x\n")
+    ref = auto_stash(git_repo)
+    assert ref is not None
+    assert stash_pop(git_repo, ref)
+
+    # Popping the same ref twice must fail loudly, not silently pop whatever
+    # else happens to be on the stack.
+    _write_file(git_repo / "someone_elses.txt", "y\n")
+    auto_stash(git_repo)
+    assert not stash_pop(git_repo, ref)
+    assert not (git_repo / "someone_elses.txt").exists()
+
+
+def test_find_stash_selector_resolves_current_position(git_repo: Path):
+    _write_file(git_repo / "first.txt", "1\n")
+    ref = auto_stash(git_repo)
+    assert find_stash_selector(git_repo, ref) == "stash@{0}"
+
+    _write_file(git_repo / "second.txt", "2\n")
+    auto_stash(git_repo)
+    # The first stash has been pushed down the stack.
+    assert find_stash_selector(git_repo, ref) == "stash@{1}"
+    assert find_stash_selector(git_repo, "0" * 40) is None
+
+
+def test_worktree_is_dirty_detects_uncommitted_work(git_repo: Path):
+    wt = create_worktree(git_repo, "dirty-check")
+    assert not worktree_is_dirty(wt)
+
+    _write_file(wt / "agent_output.txt", "work the agent has not committed\n")
+    assert worktree_is_dirty(wt)
+
+    remove_worktree(wt)
+    assert not worktree_is_dirty(wt)

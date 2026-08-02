@@ -524,3 +524,122 @@ def test_clean_all(runner, tmp_jobs):
     result = runner.invoke(cli, ["clean", "--all"])
     assert result.exit_code == 0
     assert "Cleaned 2" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Job-state reconciliation
+#
+# Job records mirror tmux state at write time. Without reconciliation, a job
+# whose session died without `tcd kill` stays "running" forever and its
+# reported elapsed time keeps growing (observed: a job claiming 30 days).
+# ---------------------------------------------------------------------------
+
+def test_jobs_reconciles_dead_sessions(runner, tmp_jobs, monkeypatch):
+    alive = _create_test_job(tmp_jobs, status="running")
+    dead = _create_test_job(tmp_jobs, status="running")
+
+    class FakeTmux:
+        def list_sessions(self):
+            return {alive.tmux_session}
+
+    monkeypatch.setattr("tcd.cli.TmuxAdapter", lambda: FakeTmux())
+
+    result = runner.invoke(cli, ["jobs"])
+    assert result.exit_code == 0
+
+    mgr = JobManager()
+    assert mgr.load_job(alive.id).status == "running"
+    reconciled = mgr.load_job(dead.id)
+    assert reconciled.status == "completed"
+    assert reconciled.completed_at is not None
+
+
+def test_jobs_no_reconcile_leaves_records_alone(runner, tmp_jobs, monkeypatch):
+    dead = _create_test_job(tmp_jobs, status="running")
+
+    class FakeTmux:
+        def list_sessions(self):
+            return set()
+
+    monkeypatch.setattr("tcd.cli.TmuxAdapter", lambda: FakeTmux())
+
+    result = runner.invoke(cli, ["jobs", "--no-reconcile"])
+    assert result.exit_code == 0
+    assert JobManager().load_job(dead.id).status == "running"
+
+
+def test_elapsed_stops_at_completion(tmp_jobs):
+    from tcd.cli import _elapsed
+
+    job = _create_test_job(tmp_jobs, status="completed")
+    job.started_at = "2026-01-01T00:00:00+00:00"
+    job.completed_at = "2026-01-01T00:05:00+00:00"
+
+    assert _elapsed(job) == 300
+
+
+def test_elapsed_counts_up_while_running(tmp_jobs):
+    from tcd.cli import _elapsed
+
+    job = _create_test_job(tmp_jobs, status="running")
+    job.started_at = "2026-01-01T00:00:00+00:00"
+    job.completed_at = None
+
+    # Still open-ended, so it must be far larger than any fixed window.
+    assert _elapsed(job) > 300
+
+
+# ---------------------------------------------------------------------------
+# tcd clean must not orphan resources
+# ---------------------------------------------------------------------------
+
+def test_clean_keeps_jobs_owning_an_unrestored_stash(runner, tmp_jobs):
+    job = _create_test_job(tmp_jobs, status="failed")
+    job.worktree_stash_ref = "abc123def456"
+    job.worktree_stash_restored = False
+    JobManager().save_job(job)
+
+    result = runner.invoke(cli, ["clean"])
+    assert result.exit_code == 0
+    assert "Cleaned 0 job(s)." in result.output
+    assert JobManager().load_job(job.id) is not None
+
+
+def test_clean_force_removes_jobs_owning_resources(runner, tmp_jobs):
+    job = _create_test_job(tmp_jobs, status="failed")
+    job.worktree_stash_ref = "abc123def456"
+    JobManager().save_job(job)
+
+    result = runner.invoke(cli, ["clean", "--force"])
+    assert result.exit_code == 0
+    assert JobManager().load_job(job.id) is None
+
+
+def test_clean_removes_jobs_with_restored_stash(runner, tmp_jobs):
+    job = _create_test_job(tmp_jobs, status="failed")
+    job.worktree_stash_ref = "abc123def456"
+    job.worktree_stash_restored = True
+    JobManager().save_job(job)
+
+    result = runner.invoke(cli, ["clean"])
+    assert result.exit_code == 0
+    assert JobManager().load_job(job.id) is None
+
+
+# ---------------------------------------------------------------------------
+# Options must not be silently dropped
+# ---------------------------------------------------------------------------
+
+def test_start_rejects_sandbox_on_providers_that_ignore_it(runner, tmp_jobs):
+    result = runner.invoke(cli, ["start", "-p", "claude", "-m", "hi", "--sandbox", "workspace-write"])
+    assert result.exit_code == 1
+    assert "does not support --sandbox" in result.output
+
+
+def test_start_provider_choices_come_from_the_registry(runner):
+    from tcd.provider import list_providers
+
+    result = runner.invoke(cli, ["start", "--help"])
+    assert result.exit_code == 0
+    for name in list_providers():
+        assert name in result.output

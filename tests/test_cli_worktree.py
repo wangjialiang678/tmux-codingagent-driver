@@ -341,36 +341,113 @@ def test_merge_command_falls_back_when_persisted_repo_root_invalid(runner, tmp_j
     merge_branch_mock.assert_called_once_with(repo_root, "tcd/test-branch", strategy="merge")
 
 
-def test_kill_cleans_worktree_and_branch(runner, tmp_jobs, tmp_path, monkeypatch):
+class _FakeTmux:
+    def session_exists(self, _session):
+        return True
+
+    def kill_session(self, _session):
+        return True
+
+
+def _kill_mocks(monkeypatch, *, dirty: bool, unmerged: bool):
+    """Wire up kill's cleanup dependencies; returns (remove, delete) mocks."""
+    remove_worktree_mock = MagicMock(return_value=True)
+    delete_branch_mock = MagicMock()
+    monkeypatch.setattr("tcd.cli._get_tmux", lambda: _FakeTmux())
+    monkeypatch.setattr("tcd.worktree.remove_worktree", remove_worktree_mock)
+    monkeypatch.setattr("tcd.worktree.delete_branch", delete_branch_mock)
+    monkeypatch.setattr("tcd.worktree.worktree_is_dirty", lambda _p: dirty)
+    monkeypatch.setattr("tcd.worktree.branch_has_new_commits", lambda _r, _b: unmerged)
+    return remove_worktree_mock, delete_branch_mock
+
+
+def test_kill_cleans_worktree_and_branch_when_nothing_is_at_stake(
+    runner, tmp_jobs, tmp_path, monkeypatch
+):
     repo_root = tmp_path / "repo"
     worktree_path = tmp_path / "repo-wt-test"
     repo_root.mkdir()
     worktree_path.mkdir()
     job = _create_worktree_job(repo_root, worktree_path)
 
-    class FakeTmux:
-        def session_exists(self, _session):
-            return True
-
-        def kill_session(self, _session):
-            return True
-
-    remove_worktree_mock = MagicMock()
-    delete_branch_mock = MagicMock()
-
-    monkeypatch.setattr("tcd.cli._get_tmux", lambda: FakeTmux())
-    monkeypatch.setattr("tcd.worktree.remove_worktree", remove_worktree_mock)
-    monkeypatch.setattr("tcd.worktree.delete_branch", delete_branch_mock)
+    remove_worktree_mock, delete_branch_mock = _kill_mocks(monkeypatch, dirty=False, unmerged=False)
 
     result = runner.invoke(cli, ["kill", job.id])
     assert result.exit_code == 0
     remove_worktree_mock.assert_called_once_with(str(worktree_path))
-    delete_branch_mock.assert_called_once_with(repo_root, "tcd/test-branch")
+    delete_branch_mock.assert_called_once_with(repo_root, "tcd/test-branch", force=False)
 
     updated = JobManager().load_job(job.id)
     assert updated is not None
     assert updated.worktree_path is None
     assert updated.worktree_branch is None
+
+
+@pytest.mark.parametrize(
+    ("dirty", "unmerged"),
+    [(True, False), (False, True)],
+    ids=["uncommitted-changes", "unmerged-commits"],
+)
+def test_kill_keeps_worktree_holding_unsaved_work(
+    runner, tmp_jobs, tmp_path, monkeypatch, dirty, unmerged
+):
+    """`git worktree remove --force` would silently discard the agent's work."""
+    repo_root = tmp_path / "repo"
+    worktree_path = tmp_path / "repo-wt-test"
+    repo_root.mkdir()
+    worktree_path.mkdir()
+    job = _create_worktree_job(repo_root, worktree_path)
+
+    remove_worktree_mock, delete_branch_mock = _kill_mocks(monkeypatch, dirty=dirty, unmerged=unmerged)
+
+    result = runner.invoke(cli, ["kill", job.id])
+    assert result.exit_code == 0
+    remove_worktree_mock.assert_not_called()
+    delete_branch_mock.assert_not_called()
+    assert "Kept worktree" in result.output
+
+    updated = JobManager().load_job(job.id)
+    assert updated is not None
+    assert updated.worktree_path == str(worktree_path)
+    assert updated.worktree_branch == "tcd/test-branch"
+
+
+def test_kill_force_discards_worktree_with_unsaved_work(runner, tmp_jobs, tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    worktree_path = tmp_path / "repo-wt-test"
+    repo_root.mkdir()
+    worktree_path.mkdir()
+    job = _create_worktree_job(repo_root, worktree_path)
+
+    remove_worktree_mock, delete_branch_mock = _kill_mocks(monkeypatch, dirty=True, unmerged=True)
+
+    result = runner.invoke(cli, ["kill", job.id, "--force"])
+    assert result.exit_code == 0
+    remove_worktree_mock.assert_called_once_with(str(worktree_path))
+    delete_branch_mock.assert_called_once_with(repo_root, "tcd/test-branch", force=True)
+
+
+def test_kill_restores_auto_stash_by_ref(runner, tmp_jobs, tmp_path, monkeypatch):
+    """The stash belongs to the user's tree; killing the agent must return it."""
+    repo_root = tmp_path / "repo"
+    worktree_path = tmp_path / "repo-wt-test"
+    repo_root.mkdir()
+    worktree_path.mkdir()
+    job = _create_worktree_job(repo_root, worktree_path)
+    job.worktree_stash_ref = "deadbeefcafe1234"
+    JobManager().save_job(job)
+
+    _kill_mocks(monkeypatch, dirty=False, unmerged=False)
+    stash_pop_mock = MagicMock(return_value=True)
+    monkeypatch.setattr("tcd.worktree.stash_pop", stash_pop_mock)
+
+    result = runner.invoke(cli, ["kill", job.id])
+    assert result.exit_code == 0
+    stash_pop_mock.assert_called_once_with(repo_root, "deadbeefcafe1234")
+
+    updated = JobManager().load_job(job.id)
+    assert updated is not None
+    assert updated.worktree_stash_restored is True
 
 
 def test_help_contains_merge(runner):

@@ -9,13 +9,14 @@ import re
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import click
 
 from tcd import __version__
 from tcd.collector import ResponseCollector
 from tcd.config import ensure_dirs, job_signal_path
-from tcd.diagnostics import diagnose
+from tcd.diagnostics import Warning as DiagnosticWarning, diagnose
 from tcd.event_log import emit, load_events
 from tcd.readiness import verify_prompt_delivery, wait_for_tui
 from tcd.job import Job, JobManager, _now_iso
@@ -69,13 +70,13 @@ def cli(verbose: int):
 # ---------------------------------------------------------------------------
 
 @cli.command()
-@click.option("-p", "--provider", required=True, type=click.Choice(["codex", "claude", "gemini"]),
+@click.option("-p", "--provider", required=True, type=click.Choice(list_providers()),
               help="AI CLI provider.")
 @click.option("-m", "--prompt", required=True, help="Task prompt (use '-' for stdin).")
 @click.option("-d", "--cwd", default=".", help="Working directory.")
 @click.option("--model", default=None, help="Model name override.")
 @click.option("--timeout", default=60, type=int, help="Timeout in minutes.")
-@click.option("--sandbox", default=None, help="Codex sandbox mode.")
+@click.option("--sandbox", default=None, help="Sandbox mode (providers that support it; Codex only today).")
 @click.option("--worktree", is_flag=True, default=False, help="Run in a git worktree for isolation.")
 @click.option("--wt-name", default=None, help="Custom worktree branch name (default: job ID).")
 def start(
@@ -106,6 +107,17 @@ def start(
         prov = get_provider(provider)
     except ValueError as e:
         click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    # Reject options the provider cannot honour, rather than accepting them and
+    # dropping them on the floor (`--sandbox` used to print a reassuring
+    # "Sandbox: ..." line while only Codex actually applied it).
+    if sandbox and not getattr(prov, "supports_sandbox", False):
+        click.echo(
+            f"Error: provider {provider!r} does not support --sandbox; "
+            f"it would be ignored. Remove the flag or use a provider that supports it.",
+            err=True,
+        )
         sys.exit(1)
 
     # Check AI CLI is installed
@@ -443,6 +455,7 @@ def check(job_id: str, as_json: bool):
     if as_json:
         pane_tail = ""
         activity_lines: list[str] = []
+        scrollback = None
         try:
             tmux = TmuxAdapter()
             pane = tmux.capture_pane(job.tmux_session)
@@ -451,12 +464,21 @@ def check(job_id: str, as_json: bool):
             # Grab more scrollback to extract meaningful activity
             scrollback = tmux.capture_pane(job.tmux_session, start_line="-200")
             if scrollback:
-                activity_lines = _extract_activity_lines(scrollback)
+                activity_lines = _extract_activity_lines(scrollback, provider=job.provider)
                 logger.debug("check %s: extracted %d activity lines from scrollback", job.id, len(activity_lines))
         except Exception:
             logger.exception("Failed to capture pane for diagnostics for job %s", job.id)
 
         diag_warnings = diagnose(job, pane_tail=pane_tail or None)
+        provider_error = _detect_provider_error(job, scrollback or pane_tail)
+        if provider_error:
+            diag_warnings.append(
+                DiagnosticWarning(
+                    code="PROVIDER_ERROR",
+                    message=f"{provider_error} — the agent cannot make progress; kill and restart",
+                    severity="error",
+                )
+            )
         payload = {
             "state": state,
             "elapsed_s": _elapsed(job),
@@ -616,9 +638,17 @@ def send(job_id: str, message: str | None, file_path: str | None):
 @cli.command()
 @click.option("--status", "status_filter", default=None, help="Filter by status.")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON.")
-def jobs(status_filter: str | None, as_json: bool):
-    """List all jobs."""
+@click.option("--no-reconcile", is_flag=True, default=False, help="Skip the tmux liveness check.")
+def jobs(status_filter: str | None, as_json: bool, no_reconcile: bool):
+    """List all jobs.
+
+    Job records are a mirror of tmux state written at job time, so the list is
+    reconciled against live sessions first — otherwise jobs whose session died
+    without a `tcd kill` stay 'running' forever.
+    """
     mgr = JobManager()
+    if not no_reconcile:
+        _reconcile_jobs(mgr)
     all_jobs = mgr.list_jobs(status_filter=status_filter)
 
     if as_json:
@@ -665,14 +695,24 @@ def attach(job_id: str):
 @cli.command()
 @click.argument("job_id", required=False)
 @click.option("--all", "kill_all", is_flag=True, help="Kill all running jobs.")
-def kill(job_id: str | None, kill_all: bool):
-    """Kill a running job."""
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Also discard a worktree that still holds unmerged commits or uncommitted changes.",
+)
+def kill(job_id: str | None, kill_all: bool, force: bool):
+    """Kill a running job.
+
+    The agent's worktree is kept when it still holds work that is not on the
+    main branch; pass --force to discard it.
+    """
     tmux = _get_tmux()
     mgr = JobManager()
 
     if kill_all:
         for j in mgr.list_jobs(status_filter="running"):
-            _kill_job(j, tmux, mgr)
+            _kill_job(j, tmux, mgr, force=force)
             click.echo(f"Killed: {j.id}")
         return
 
@@ -685,7 +725,7 @@ def kill(job_id: str | None, kill_all: bool):
         click.echo(f"Error: job {job_id!r} not found.", err=True)
         sys.exit(1)
 
-    _kill_job(job, tmux, mgr)
+    _kill_job(job, tmux, mgr, force=force)
     click.echo(f"Killed: {job.id}")
 
 
@@ -710,7 +750,7 @@ def merge(job_id: str, squash: bool, no_cleanup: bool):
 
     from pathlib import Path
 
-    from tcd.worktree import branch_has_new_commits, delete_branch, get_main_repo_root, is_git_repo, merge_branch, remove_worktree, stash_pop
+    from tcd.worktree import branch_has_new_commits, delete_branch, get_main_repo_root, is_git_repo, merge_branch, remove_worktree
 
     # Determine repo_root with defensive fallback chain
     repo_root = None
@@ -802,13 +842,7 @@ def merge(job_id: str, squash: bool, no_cleanup: bool):
             click.echo(f"Warning: merge succeeded but cleanup failed: {exc}", err=True)
 
     # Restore stashed changes if any were auto-stashed before worktree creation
-    if job.worktree_stash_ref:
-        if stash_pop(repo_root):
-            click.echo("Restored stashed changes.")
-            logger.info("merge %s: stash popped successfully", job.id)
-        else:
-            click.echo("Warning: failed to pop stash. Run 'git stash pop' manually.", err=True)
-            logger.warning("merge %s: stash pop failed, ref=%s", job.id, job.worktree_stash_ref)
+    _restore_auto_stash(job, repo_root, mgr)
 
 
 # ---------------------------------------------------------------------------
@@ -817,16 +851,70 @@ def merge(job_id: str, squash: bool, no_cleanup: bool):
 
 @cli.command()
 @click.option("--all", "clean_all", is_flag=True, help="Clean all jobs (including running).")
-def clean(clean_all: bool):
-    """Clean completed/failed jobs."""
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Clean even jobs that still own a worktree or an unrestored stash.",
+)
+def clean(clean_all: bool, force: bool):
+    """Clean completed/failed jobs.
+
+    The job record is the only place a worktree path and auto-stash ref are
+    written down, so jobs still holding either are skipped unless --force.
+    """
     mgr = JobManager()
-    count = mgr.clean_jobs(include_running=clean_all)
+
+    skipped: list[tuple[str, str]] = []
+    if not force:
+        for job in mgr.list_jobs():
+            reason = None
+            if job.worktree_path and Path(job.worktree_path).exists():
+                reason = f"worktree still at {job.worktree_path}"
+            elif job.worktree_stash_ref and not job.worktree_stash_restored:
+                reason = f"auto-stash {job.worktree_stash_ref[:8]} not restored"
+            if reason:
+                skipped.append((job.id, reason))
+
+    count = mgr.clean_jobs(include_running=clean_all, skip_ids={j for j, _ in skipped})
     click.echo(f"Cleaned {count} job(s).")
+    if skipped:
+        click.echo(f"Kept {len(skipped)} job(s) that still own resources:", err=True)
+        for job_id, reason in skipped:
+            click.echo(f"  {job_id}: {reason}", err=True)
+        click.echo("Resolve with `tcd merge <id>` / `tcd kill <id>`, or re-run with --force.", err=True)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _reconcile_jobs(mgr: JobManager) -> int:
+    """Close out jobs whose tmux session is gone. Returns how many changed."""
+    try:
+        live = TmuxAdapter().list_sessions()
+    except Exception:
+        logger.warning("reconcile: could not list tmux sessions", exc_info=True)
+        return 0
+
+    changed = 0
+    for job in mgr.list_jobs():
+        if job.status not in ("running", "pending"):
+            continue
+        if job.tmux_session in live:
+            continue
+        if job.turn_state == "working":
+            job.status = "failed"
+            job.error = job.error or "tmux session disappeared while turn was working"
+        else:
+            job.status = "completed"
+        job.completed_at = job.completed_at or _now_iso()
+        mgr.save_job(job)
+        emit(job.id, "job.reconciled", status=job.status)
+        logger.info("reconcile %s: session %s gone, marked %s", job.id, job.tmux_session, job.status)
+        changed += 1
+    return changed
+
 
 def _refresh_status(job: Job, mgr: JobManager) -> None:
     """Refresh job status based on tmux session state."""
@@ -867,7 +955,47 @@ def _running_idle_note(job: Job) -> str | None:
     return None
 
 
-def _kill_job(job: Job, tmux: TmuxAdapter, mgr: JobManager) -> None:
+def _restore_auto_stash(job: Job, repo_root, mgr: JobManager) -> None:
+    """Give the caller back the changes `tcd start --worktree` stashed away.
+
+    Runs on every terminal path, not just `tcd merge` — the stash belongs to the
+    user's working tree, so killing the agent must not strand it.
+    """
+    if not job.worktree_stash_ref or job.worktree_stash_restored:
+        return
+    from tcd.worktree import stash_pop
+
+    if stash_pop(repo_root, job.worktree_stash_ref):
+        job.worktree_stash_restored = True
+        mgr.save_job(job)
+        click.echo(f"Restored your stashed changes ({job.worktree_stash_ref[:8]}).")
+        emit(job.id, "job.stash_restored", ref=job.worktree_stash_ref)
+    else:
+        click.echo(
+            f"Warning: could not restore your auto-stash {job.worktree_stash_ref[:8]}; "
+            f"it is still in `git stash list` of {repo_root}.",
+            err=True,
+        )
+        emit(job.id, "job.stash_restore_failed", ref=job.worktree_stash_ref)
+
+
+def _worktree_has_unsaved_work(job: Job, repo_root) -> str | None:
+    """Return a reason string when discarding the worktree would lose work."""
+    from tcd.worktree import branch_has_new_commits, worktree_is_dirty
+
+    if job.worktree_path and worktree_is_dirty(job.worktree_path):
+        return "uncommitted changes in the worktree"
+    if job.worktree_branch:
+        try:
+            if branch_has_new_commits(repo_root, job.worktree_branch):
+                return f"commits on {job.worktree_branch} that are not in HEAD"
+        except Exception:
+            logger.warning("kill %s: could not compare branch %s", job.id, job.worktree_branch, exc_info=True)
+            return f"unknown state of branch {job.worktree_branch}"
+    return None
+
+
+def _kill_job(job: Job, tmux: TmuxAdapter, mgr: JobManager, *, force: bool = False) -> None:
     logger.info("kill %s: killing job (provider=%s, elapsed=%ds)", job.id, job.provider, _elapsed(job))
     if tmux.session_exists(job.tmux_session):
         tmux.kill_session(job.tmux_session)
@@ -883,19 +1011,36 @@ def _kill_job(job: Job, tmux: TmuxAdapter, mgr: JobManager) -> None:
 
             repo_root = Path(job.worktree_repo_root) if job.worktree_repo_root else get_main_repo_root(job.cwd)
 
-            cleaned = remove_worktree(job.worktree_path)
-            if cleaned:
+            # `git worktree remove --force` throws away whatever the agent had
+            # not committed, and agents forgetting to commit is a known failure
+            # mode — so check before destroying anything.
+            blocker = None if force else _worktree_has_unsaved_work(job, repo_root)
+            if blocker:
+                click.echo(f"Kept worktree: {blocker}.", err=True)
+                click.echo(f"  worktree: {job.worktree_path}", err=True)
                 if job.worktree_branch:
-                    delete_branch(repo_root, job.worktree_branch)
-                logger.info("kill %s: worktree removed at %s", job.id, job.worktree_path)
-                emit(job.id, "job.worktree_removed", worktree_path=job.worktree_path)
-                job.worktree_path = None
-                job.worktree_branch = None
-                mgr.save_job(job)
+                    click.echo(f"  branch:   {job.worktree_branch}", err=True)
+                click.echo(
+                    f"  merge it with `tcd merge {job.id}`, or discard with `tcd kill {job.id} --force`.",
+                    err=True,
+                )
+                emit(job.id, "job.worktree_kept", reason=blocker, worktree_path=job.worktree_path)
             else:
-                logger.warning("kill %s: worktree removal failed, skipping branch cleanup for %s", job.id, job.worktree_path)
+                cleaned = remove_worktree(job.worktree_path)
+                if cleaned:
+                    if job.worktree_branch:
+                        delete_branch(repo_root, job.worktree_branch, force=force)
+                    logger.info("kill %s: worktree removed at %s", job.id, job.worktree_path)
+                    emit(job.id, "job.worktree_removed", worktree_path=job.worktree_path)
+                    job.worktree_path = None
+                    job.worktree_branch = None
+                    mgr.save_job(job)
+                else:
+                    logger.warning("kill %s: worktree removal failed, skipping branch cleanup for %s", job.id, job.worktree_path)
+
+            _restore_auto_stash(job, repo_root, mgr)
         except Exception:
-            logger.warning("kill %s: failed to remove worktree at %s", job.id, job.worktree_path, exc_info=True)
+            logger.warning("kill %s: failed to clean up worktree at %s", job.id, job.worktree_path, exc_info=True)
     emit(job.id, "job.killed", reason="user")
 
 
@@ -912,23 +1057,36 @@ def _format_event_line(entry: dict) -> str:
     return f"{ts} {event}"
 
 
-# Patterns that indicate meaningful Codex activity (not TUI chrome)
+# Patterns that indicate meaningful agent activity (not TUI chrome).
+# Kept provider-neutral: every coding CLI reports file operations and test
+# results in some form, so tuning this list to one vendor quietly degrades the
+# `activity` field for the others.
 _ACTIVITY_PATTERNS = re.compile(
-    r"^[•\-\*]\s|"                     # bullet points (Codex action summaries)
-    r"^\s*(Edited|Created|Read|Ran |Deleted|Moved|Searched|Explored|Wrote)\b|"
+    r"^[•\-\*]\s|"                     # bullet points (action summaries)
+    r"^\s*(Edited|Created|Read|Ran |Deleted|Moved|Searched|Explored|Wrote|Updated)\b|"
     r"^\s*[✓✗✔✘⚠]|"                  # status indicators
     r"passed|failed|error|PASS|FAIL|"  # test results
     r"^\d+\s+(passed|failed)|"         # pytest summary
     r"Worked for "                      # Codex timing
 )
 
+# Line prefixes that are TUI furniture rather than work, per provider. The
+# status bar shows the model name, which differs by vendor.
+_CHROME_PREFIXES: dict[str, tuple[str, ...]] = {
+    "codex": ("›", "gpt-", "─"),
+    "claude": ("❯", ">", "claude-", "─"),
+    "gemini": ("›", ">", "gemini-", "─"),
+}
+_DEFAULT_CHROME_PREFIXES = ("›", "❯", ">", "─")
 
-def _extract_activity_lines(scrollback: str, max_lines: int = 15) -> list[str]:
-    """Extract meaningful activity lines from Codex scrollback.
+
+def _extract_activity_lines(scrollback: str, max_lines: int = 15, *, provider: str | None = None) -> list[str]:
+    """Extract meaningful activity lines from an agent's scrollback.
 
     Filters out TUI chrome, empty lines, and status bar to surface
     actual work: file operations, test results, and action summaries.
     """
+    chrome = _CHROME_PREFIXES.get(provider or "", _DEFAULT_CHROME_PREFIXES)
     lines = scrollback.splitlines()
     result = []
     for line in lines:
@@ -936,7 +1094,7 @@ def _extract_activity_lines(scrollback: str, max_lines: int = 15) -> list[str]:
         if not stripped:
             continue
         # Skip TUI chrome
-        if stripped.startswith(("›", "gpt-", "─")):
+        if stripped.startswith(chrome):
             continue
         if _ACTIVITY_PATTERNS.search(stripped):
             result.append(stripped)
@@ -945,15 +1103,37 @@ def _extract_activity_lines(scrollback: str, max_lines: int = 15) -> list[str]:
     return matched
 
 
+def _detect_provider_error(job: Job, pane: str | None) -> str | None:
+    """Ask the provider whether the pane shows a fatal API-side failure."""
+    if not pane:
+        return None
+    try:
+        return get_provider(job.provider).detect_provider_error(pane)
+    except Exception:
+        logger.debug("provider error detection failed for job %s", job.id, exc_info=True)
+        return None
+
+
 def _elapsed(job: Job) -> int:
-    """Seconds since job started."""
+    """How long the job ran.
+
+    Once a job reaches a terminal state the clock stops at ``completed_at``;
+    measuring against "now" made finished jobs report weeks of runtime.
+    """
     from datetime import datetime, timezone
     start = job.started_at or job.created_at
     try:
         dt = datetime.fromisoformat(start)
-        return int((datetime.now(timezone.utc) - dt).total_seconds())
     except (ValueError, TypeError):
         return 0
+
+    end = datetime.now(timezone.utc)
+    if job.completed_at:
+        try:
+            end = datetime.fromisoformat(job.completed_at)
+        except (ValueError, TypeError):
+            pass
+    return max(0, int((end - dt).total_seconds()))
 
 
 if __name__ == "__main__":

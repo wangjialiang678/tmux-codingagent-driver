@@ -7,6 +7,7 @@ import logging
 import re
 import shlex
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 from tcd.config import job_log_path, job_signal_path
@@ -27,6 +28,23 @@ QUEUED_MESSAGE_RE = re.compile(r"press\s+up\s+to\s+edit\s+queued\s+messages?", r
 def has_queued_message_notice(pane: str) -> bool:
     """Return True when Claude Code reports a submitted prompt is still queued."""
     return bool(QUEUED_MESSAGE_RE.search(pane))
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _iso_to_timestamp(value: str | None) -> float:
+    """Convert an ISO timestamp to epoch seconds; 0.0 when unknown."""
+    if not value:
+        return 0.0
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except (ValueError, TypeError):
+        return 0.0
 
 
 @register_provider
@@ -131,21 +149,38 @@ class ClaudeProvider(Provider):
         except OSError as exc:
             logger.error("Failed to write signal file: %s", exc)
 
+    @staticmethod
+    def encode_project_dir(cwd: str) -> str:
+        """Mirror Claude Code's project-directory encoding for a working dir.
+
+        Claude stores transcripts under ~/.claude/projects/<encoded-cwd>/ where
+        the encoding replaces every non-alphanumeric character with '-'.
+        """
+        return "".join(c if c.isalnum() else "-" for c in cwd)
+
     def _find_session_file(self, job: Job) -> Path | None:
-        """Find the Claude session file by scanning ~/.claude/projects/."""
+        """Find the transcript for *this job* under ~/.claude/projects/.
+
+        Scoped to the job's own project directory and to files touched after
+        the job started. Taking the globally newest .jsonl instead would
+        usually return the orchestrator's own transcript, because driving tcd
+        from inside a Claude Code session keeps that file the most recently
+        written one.
+        """
         if not CLAUDE_PROJECTS_DIR.exists():
             return None
 
-        # Scan for the most recently modified .jsonl file
-        candidates: list[Path] = []
-        for p in CLAUDE_PROJECTS_DIR.rglob("*.jsonl"):
-            candidates.append(p)
+        project_dir = CLAUDE_PROJECTS_DIR / self.encode_project_dir(job.cwd)
+        if not project_dir.is_dir():
+            return None
 
+        started = _iso_to_timestamp(job.started_at or job.created_at)
+        candidates = [p for p in project_dir.rglob("*.jsonl") if _mtime(p) >= started]
         if not candidates:
             return None
 
-        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        return candidates[0] if candidates else None
+        candidates.sort(key=_mtime, reverse=True)
+        return candidates[0]
 
     @staticmethod
     def _parse_jsonl(path: Path) -> str | None:

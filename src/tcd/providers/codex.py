@@ -198,6 +198,8 @@ class CodexProvider(Provider):
     # started / the prompt is echoed). If not, resend. Guards against the
     # readiness race above slipping through on slow MCP startup.
     verify_prompt_delivery = True
+    # `codex -s <mode>` is real; see build_launch_command.
+    supports_sandbox = True
 
     def check_cli(self) -> None:
         if shutil.which(self.cli_command) is None:

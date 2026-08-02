@@ -111,6 +111,11 @@ class TCD:
         except ValueError as e:
             raise TCDError(str(e)) from e
 
+        if sandbox and not getattr(prov, "supports_sandbox", False):
+            raise TCDError(
+                f"provider {provider!r} does not support sandbox; it would be silently ignored"
+            )
+
         if hasattr(prov, "check_cli"):
             try:
                 prov.check_cli()
@@ -470,16 +475,38 @@ class TCD:
                 else:
                     logger.warning("merge %s: worktree removal failed, skipping branch cleanup", job.id)
 
-        if job.worktree_stash_ref:
-            if not stash_pop(repo_root):
-                logger.warning("merge %s: stash pop failed, ref=%s", job.id, job.worktree_stash_ref)
+        self._restore_auto_stash(job, repo_root)
 
         self._mgr.save_job(job)
 
         return True
 
-    def kill(self, job_id: str) -> None:
+    def _restore_auto_stash(self, job, repo_root) -> bool:
+        """Pop the job's own auto-stash, by ref, at most once.
+
+        The stash stack is repo-wide: popping the top would hand this job's
+        merge whatever a concurrent worktree job stashed.
+        """
+        if not job.worktree_stash_ref or job.worktree_stash_restored:
+            return False
+        from tcd.worktree import stash_pop
+
+        if stash_pop(repo_root, job.worktree_stash_ref):
+            job.worktree_stash_restored = True
+            self._mgr.save_job(job)
+            emit(job.id, "job.stash_restored", ref=job.worktree_stash_ref)
+            return True
+        logger.warning("merge %s: stash pop failed, ref=%s", job.id, job.worktree_stash_ref)
+        emit(job.id, "job.stash_restore_failed", ref=job.worktree_stash_ref)
+        return False
+
+    def kill(self, job_id: str, *, force: bool = False) -> None:
         """Kill a running job.
+
+        A worktree still holding uncommitted changes or unmerged commits is
+        kept — ``git worktree remove --force`` would discard the agent's work,
+        and agents forgetting to commit is a known failure mode. Pass
+        ``force=True`` to discard it anyway.
 
         Raises:
             JobNotFoundError: If job doesn't exist.
@@ -498,22 +525,44 @@ class TCD:
             try:
                 from pathlib import Path
 
-                from tcd.worktree import delete_branch, get_main_repo_root, remove_worktree
+                from tcd.worktree import (
+                    branch_has_new_commits,
+                    delete_branch,
+                    get_main_repo_root,
+                    remove_worktree,
+                    worktree_is_dirty,
+                )
 
                 repo_root = Path(job.worktree_repo_root) if job.worktree_repo_root else get_main_repo_root(job.cwd)
 
-                cleaned = remove_worktree(job.worktree_path)
-                if cleaned:
-                    if job.worktree_branch:
-                        delete_branch(repo_root, job.worktree_branch)
-                    emit(job.id, "job.worktree_removed", worktree_path=job.worktree_path)
-                    job.worktree_path = None
-                    job.worktree_branch = None
-                    self._mgr.save_job(job)
+                unsaved = False
+                if not force:
+                    unsaved = worktree_is_dirty(job.worktree_path) or (
+                        bool(job.worktree_branch) and branch_has_new_commits(repo_root, job.worktree_branch)
+                    )
+
+                if unsaved:
+                    logger.warning(
+                        "kill %s: worktree %s still holds unsaved work, keeping it",
+                        job.id,
+                        job.worktree_path,
+                    )
+                    emit(job.id, "job.worktree_kept", worktree_path=job.worktree_path)
                 else:
-                    logger.warning("kill %s: worktree removal failed, skipping branch cleanup for %s", job.id, job.worktree_path)
+                    cleaned = remove_worktree(job.worktree_path)
+                    if cleaned:
+                        if job.worktree_branch:
+                            delete_branch(repo_root, job.worktree_branch, force=force)
+                        emit(job.id, "job.worktree_removed", worktree_path=job.worktree_path)
+                        job.worktree_path = None
+                        job.worktree_branch = None
+                        self._mgr.save_job(job)
+                    else:
+                        logger.warning("kill %s: worktree removal failed, skipping branch cleanup for %s", job.id, job.worktree_path)
+
+                self._restore_auto_stash(job, repo_root)
             except Exception:
-                pass  # best-effort cleanup
+                logger.warning("kill %s: worktree cleanup failed", job.id, exc_info=True)
         emit(job.id, "job.killed", reason="user")
 
     def clean(self, *, include_running: bool = False) -> int:

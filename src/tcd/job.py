@@ -56,6 +56,9 @@ class Job:
     worktree_branch: str | None = None
     worktree_repo_root: str | None = None
     worktree_stash_ref: str | None = None
+    # Set once the auto-stash has been restored, so merge and kill can each
+    # attempt the restore without popping the same stash twice.
+    worktree_stash_restored: bool = False
     total_tokens: dict[str, int] = field(default_factory=lambda: {"input": 0, "output": 0})
 
     def to_dict(self) -> dict:
@@ -147,8 +150,11 @@ class JobManager:
         jobs.sort(key=lambda j: j.created_at, reverse=True)
         return jobs
 
-    def clean_jobs(self, *, include_running: bool = False) -> int:
+    def clean_jobs(self, *, include_running: bool = False, skip_ids: set[str] | None = None) -> int:
         """Remove completed/failed jobs and their associated files.
+
+        *skip_ids* keeps jobs whose record is still the only pointer to a live
+        resource (worktree, unrestored stash); deleting those would orphan them.
 
         Returns the number of jobs cleaned.
         """
@@ -156,10 +162,11 @@ class JobManager:
         if include_running:
             removable.add("running")
             removable.add("pending")
+        skip = skip_ids or set()
 
         cleaned = 0
         for job in self.list_jobs():
-            if job.status in removable:
+            if job.status in removable and job.id not in skip:
                 self._remove_job_files(job.id)
                 cleaned += 1
         return cleaned

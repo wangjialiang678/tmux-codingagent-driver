@@ -351,8 +351,8 @@ def test_merge_worktree_no_worktree(sdk):
         sdk.merge_worktree("test123")
 
 
-def test_kill_cleans_worktree(sdk):
-    job = Job(
+def _worktree_job() -> Job:
+    return Job(
         id="test123",
         provider="codex",
         status="running",
@@ -363,18 +363,76 @@ def test_kill_cleans_worktree(sdk):
         worktree_branch="tcd/test123",
         worktree_repo_root="/repo",
     )
+
+
+def test_kill_cleans_worktree(sdk):
+    job = _worktree_job()
     sdk._mgr.load_job.return_value = job
 
     with (
         patch("tcd.worktree.remove_worktree") as mock_remove,
         patch("tcd.worktree.delete_branch") as mock_delete,
+        patch("tcd.worktree.worktree_is_dirty", return_value=False),
+        patch("tcd.worktree.branch_has_new_commits", return_value=False),
     ):
         sdk.kill("test123")
 
     mock_remove.assert_called_once_with("/repo-wt-test123")
-    mock_delete.assert_called_once_with(Path("/repo"), "tcd/test123")
+    mock_delete.assert_called_once_with(Path("/repo"), "tcd/test123", force=False)
     assert job.worktree_path is None
     assert job.worktree_branch is None
+
+
+def test_kill_keeps_worktree_with_unsaved_work(sdk):
+    """Destroying an agent's uncommitted work on kill is not recoverable."""
+    job = _worktree_job()
+    sdk._mgr.load_job.return_value = job
+
+    with (
+        patch("tcd.worktree.remove_worktree") as mock_remove,
+        patch("tcd.worktree.delete_branch") as mock_delete,
+        patch("tcd.worktree.worktree_is_dirty", return_value=True),
+        patch("tcd.worktree.branch_has_new_commits", return_value=False),
+    ):
+        sdk.kill("test123")
+
+    mock_remove.assert_not_called()
+    mock_delete.assert_not_called()
+    assert job.worktree_path == "/repo-wt-test123"
+
+
+def test_kill_force_discards_worktree_with_unsaved_work(sdk):
+    job = _worktree_job()
+    sdk._mgr.load_job.return_value = job
+
+    with (
+        patch("tcd.worktree.remove_worktree") as mock_remove,
+        patch("tcd.worktree.delete_branch") as mock_delete,
+        patch("tcd.worktree.worktree_is_dirty", return_value=True),
+        patch("tcd.worktree.branch_has_new_commits", return_value=True),
+    ):
+        sdk.kill("test123", force=True)
+
+    mock_remove.assert_called_once_with("/repo-wt-test123")
+    mock_delete.assert_called_once_with(Path("/repo"), "tcd/test123", force=True)
+
+
+def test_kill_restores_auto_stash_by_ref(sdk):
+    job = _worktree_job()
+    job.worktree_stash_ref = "abc123def456"
+    sdk._mgr.load_job.return_value = job
+
+    with (
+        patch("tcd.worktree.remove_worktree"),
+        patch("tcd.worktree.delete_branch"),
+        patch("tcd.worktree.worktree_is_dirty", return_value=False),
+        patch("tcd.worktree.branch_has_new_commits", return_value=False),
+        patch("tcd.worktree.stash_pop", return_value=True) as mock_pop,
+    ):
+        sdk.kill("test123")
+
+    mock_pop.assert_called_once_with(Path("/repo"), "abc123def456")
+    assert job.worktree_stash_restored is True
 
 
 def test_kill_no_worktree(sdk):

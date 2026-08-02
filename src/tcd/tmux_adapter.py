@@ -101,6 +101,19 @@ class TmuxAdapter:
         except subprocess.CalledProcessError:
             return False
 
+    def list_sessions(self) -> set[str]:
+        """Return all live tmux session names in one call.
+
+        Reconciling a long job list one `has-session` at a time costs a
+        subprocess per job; this pays for a single `list-sessions`.
+        """
+        try:
+            result = _run([self.tmux, "list-sessions", "-F", "#{session_name}"])
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            # No server running means no sessions.
+            return set()
+        return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
     def send_keys(self, session: str, text: str) -> bool:
         """Inject *text* into the tmux session via send-keys -l + Enter.
 

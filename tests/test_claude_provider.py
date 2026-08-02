@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -113,3 +116,70 @@ def test_parse_jsonl_empty(tmp_path: Path):
     f.write_text("")
     result = ClaudeProvider._parse_jsonl(f)
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Session-file lookup must be scoped to the job
+#
+# Driving tcd from inside a Claude Code session keeps the orchestrator's own
+# transcript the most recently written .jsonl in ~/.claude/projects, so a
+# global "newest file" scan returns the caller's transcript, not the job's.
+# ---------------------------------------------------------------------------
+
+def _make_job(cwd: str, started_at: str) -> Job:
+    return Job(
+        id="job1",
+        provider="claude",
+        status="running",
+        prompt="task",
+        cwd=cwd,
+        tmux_session="tcd-claude-job1",
+        started_at=started_at,
+    )
+
+
+def test_find_session_file_ignores_other_projects(tmp_path, monkeypatch):
+    projects = tmp_path / "projects"
+    provider = ClaudeProvider()
+
+    job_cwd = "/Users/dev/target-project"
+    job_dir = projects / provider.encode_project_dir(job_cwd)
+    job_dir.mkdir(parents=True)
+    job_file = job_dir / "session.jsonl"
+    job_file.write_text('{"role":"assistant","content":"from the job"}\n')
+
+    # The orchestrator's own transcript, written later, in a different project.
+    other_dir = projects / provider.encode_project_dir("/Users/dev/orchestrator")
+    other_dir.mkdir(parents=True)
+    other_file = other_dir / "session.jsonl"
+    other_file.write_text('{"role":"assistant","content":"from the caller"}\n')
+    os.utime(other_file, (time.time() + 60, time.time() + 60))
+
+    monkeypatch.setattr("tcd.providers.claude.CLAUDE_PROJECTS_DIR", projects)
+
+    job = _make_job(job_cwd, "2020-01-01T00:00:00+00:00")
+    assert provider.get_session_log_path(job) == job_file
+
+
+def test_find_session_file_ignores_transcripts_older_than_the_job(tmp_path, monkeypatch):
+    projects = tmp_path / "projects"
+    provider = ClaudeProvider()
+
+    job_cwd = "/Users/dev/target-project"
+    job_dir = projects / provider.encode_project_dir(job_cwd)
+    job_dir.mkdir(parents=True)
+    stale = job_dir / "previous-session.jsonl"
+    stale.write_text('{"role":"assistant","content":"last week"}\n')
+    os.utime(stale, (1_600_000_000, 1_600_000_000))
+
+    monkeypatch.setattr("tcd.providers.claude.CLAUDE_PROJECTS_DIR", projects)
+
+    job = _make_job(job_cwd, datetime.now(timezone.utc).isoformat())
+    assert provider.get_session_log_path(job) is None
+
+
+def test_encode_project_dir_matches_claude_layout():
+    assert (
+        ClaudeProvider.encode_project_dir("/Users/dev/my project.v2")
+        == "-Users-dev-my-project-v2"
+    )
