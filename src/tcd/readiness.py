@@ -37,7 +37,13 @@ TRUST_PHRASES = (
 WORKING_MARKERS = ("esc to interrupt", "tokens used", "working (")
 
 
-def wait_for_tui(tmux, session: str, prov) -> tuple[bool, int, bool]:
+def wait_for_tui(
+    tmux,
+    session: str,
+    prov,
+    *,
+    timeout_secs: float = 90.0,
+) -> tuple[bool, int, bool]:
     """Wait for the agent TUI to be ready, handling trust dialogs.
 
     Returns ``(tui_ready, elapsed_ms, trust_handled)``.
@@ -50,9 +56,11 @@ def wait_for_tui(tmux, session: str, prov) -> tuple[bool, int, bool]:
     prev_pane: str | None = None
     stable_since: float | None = None
 
-    # 0.5s per iteration; allow up to 90s for slow MCP startup.
-    for _ in range(180):
-        time.sleep(0.5)
+    # Keep the default startup window unchanged while letting doctor enforce
+    # an independent budget for every provider it probes.
+    deadline = wait_started + max(0.0, timeout_secs)
+    while time.time() < deadline:
+        time.sleep(min(0.5, max(0.0, deadline - time.time())))
         # Visible screen only (-S 0). Capturing full scrollback would keep
         # matching a *dismissed* trust dialog that lingers in history, so the
         # loop would re-confirm it forever and never become ready.
@@ -65,13 +73,13 @@ def wait_for_tui(tmux, session: str, prov) -> tuple[bool, int, bool]:
             trust_handled = True
             stable_since = None
             prev_pane = None
-            time.sleep(2)
+            time.sleep(min(2.0, max(0.0, deadline - time.time())))
             continue
 
         if trust_handled and "restarting" in pane.lower():
             stable_since = None
             prev_pane = None
-            time.sleep(1)
+            time.sleep(min(1.0, max(0.0, deadline - time.time())))
             continue
 
         if indicator and indicator in pane:
@@ -92,14 +100,20 @@ def wait_for_tui(tmux, session: str, prov) -> tuple[bool, int, bool]:
             prev_pane = pane
     else:
         # Fallback: wait a bit and proceed anyway.
-        time.sleep(2)
+        time.sleep(min(2.0, max(0.0, deadline - time.time())))
 
     elapsed_ms = int((time.time() - wait_started) * 1000)
     return tui_ready, elapsed_ms, trust_handled
 
 
 def verify_prompt_delivery(
-    tmux, session: str, job_id: str, sent_text: str, *, retries: int = 2
+    tmux,
+    session: str,
+    job_id: str,
+    sent_text: str,
+    *,
+    retries: int = 2,
+    timeout_secs: float | None = None,
 ) -> bool:
     """Confirm the agent received the prompt; resend if it was dropped.
 
@@ -116,8 +130,14 @@ def verify_prompt_delivery(
             break
 
     def landed() -> bool:
+        deadline = time.time() + timeout_secs if timeout_secs is not None else None
         for _ in range(8):  # ~4s of observation
-            time.sleep(0.5)
+            if deadline is not None and time.time() >= deadline:
+                return False
+            sleep_for = 0.5 if deadline is None else min(0.5, max(0.0, deadline - time.time()))
+            if sleep_for <= 0:
+                return False
+            time.sleep(sleep_for)
             pane = tmux.capture_pane(session, start_line="0")
             if pane is None:
                 continue

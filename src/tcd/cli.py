@@ -17,6 +17,7 @@ from tcd import __version__
 from tcd.collector import ResponseCollector
 from tcd.config import ensure_dirs, job_signal_path
 from tcd.diagnostics import Warning as DiagnosticWarning, diagnose
+from tcd.doctor import run_doctor
 from tcd.event_log import emit, load_events
 from tcd.readiness import verify_prompt_delivery, wait_for_tui
 from tcd.job import Job, JobManager, _now_iso
@@ -48,7 +49,8 @@ def _get_tmux() -> TmuxAdapter:
 @click.group()
 @click.version_option(__version__, "-V", "--version", prog_name="tcd")
 @click.option("-v", "--verbose", count=True, help="Increase verbosity (-v=INFO, -vv=DEBUG).")
-def cli(verbose: int):
+@click.pass_context
+def cli(ctx: click.Context, verbose: int):
     """tcd — tmux-codingagent-driver: Drive AI CLI tools via tmux."""
     # Configure logging: default=WARNING, -v=INFO, -vv=DEBUG
     level = logging.WARNING
@@ -62,7 +64,42 @@ def cli(verbose: int):
         level=level,
         stream=sys.stderr,
     )
-    ensure_dirs()
+    if ctx.invoked_subcommand != "doctor":
+        ensure_dirs()
+
+
+# ---------------------------------------------------------------------------
+# tcd doctor
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.option("--live", is_flag=True, help="Launch disposable provider sessions for live probes.")
+@click.option(
+    "--provider",
+    type=click.Choice(list_providers()),
+    default=None,
+    help="Run the live probe for one provider only (requires --live).",
+)
+@click.option(
+    "--timeout",
+    type=click.IntRange(min=1),
+    default=90,
+    show_default=True,
+    help="Maximum seconds for each live provider probe.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON.")
+def doctor(live: bool, provider: str | None, timeout: int, as_json: bool):
+    """Check whether tcd's provider detection assumptions still hold.
+
+    Exit codes: 0=all checks pass, 1=one or more warnings, 2=one or more errors.
+    """
+    report = run_doctor(live=live, provider=provider, timeout=timeout)
+    if as_json:
+        click.echo(json.dumps(report.to_dict(), ensure_ascii=False))
+    else:
+        click.echo(report.format_text())
+    sys.exit(report.exit_code)
 
 
 # ---------------------------------------------------------------------------
