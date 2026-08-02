@@ -36,6 +36,36 @@ repos driven by tcd in July, one holding 7 files and +513 lines.
 - The stash was restored only by `tcd merge`. `tcd kill` restores it too, with
   `worktree_stash_restored` making the restore idempotent across both paths.
 
+### The stash lifecycle is now sound under concurrency
+
+Found by an adversarial review of the fix above (Codex, driven through tcd),
+which established that restoring by ref cured the symptom while the
+surrounding lifecycle still had holes:
+
+- Stash entries are tagged with the job id and identified by message rather
+  than by reading the top of the stack after pushing — under concurrency that
+  read returns another job's entry, and when the tree is already clean
+  `git stash push` succeeds *without creating one at all*.
+- Resolving a ref to a position and popping it are two git processes, so both
+  now run under a repo-scoped `flock`, which also serialises a racing merge and
+  kill.
+- `tcd start` creates the job record before stashing, so a failure in between
+  can no longer leave changes stashed with nothing pointing at them; every
+  early exit restores.
+- Restore on kill is no longer gated on the worktree still existing — a merge
+  that removed the worktree but hit a conflict popping the stash used to be
+  unrecoverable through any command.
+- Pre-0.4.0 jobs that persisted the literal `stash@{0}` are honoured, with a
+  warning that the position may have shifted.
+- `clean` no longer blocks on a stash the user already popped by hand, and
+  `--force` prints what it is orphaning.
+- Gemini declares its own running marker (`esc to cancel`, verified against the
+  installed bundle). With delivery verification newly on by default, the Codex
+  spelling alone would have re-sent prompts to a healthy Gemini turn.
+- `PROVIDER_ERROR` matches machine-emitted error envelopes instead of bare
+  substrings — an agent *writing* retry logic used to trip it — and is a
+  warning rather than an error.
+
 ### Job state is reconciled instead of assumed
 
 `tcd jobs` was reporting 54 `running` jobs against 9 live tmux sessions, the
@@ -66,8 +96,9 @@ oldest claiming 30 days of runtime.
 
 ### Tests
 
-290 passing (was 253), including the concurrency case that proves job A's
-stash survives job B's merge.
+312 passing (was 253), including the concurrency cases that prove job A's
+stash survives job B's merge, that a repo lock actually serialises, and that
+PROVIDER_ERROR stays quiet while an agent writes retry logic.
 
 ---
 
