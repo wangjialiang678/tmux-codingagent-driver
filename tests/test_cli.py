@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from click.testing import CliRunner
 
@@ -21,18 +22,30 @@ def runner():
 
 
 def test_version_flag_reports_package_version(runner):
-    """`tcd --version` must exist and agree with the packaged version.
+    """`tcd --version` must exist and report `__version__`.
 
     Both spellings are checked because `-v` is verbosity, not version.
     """
-    from importlib.metadata import version as pkg_version
-
     for flag in ("--version", "-V"):
         result = runner.invoke(cli, [flag])
         assert result.exit_code == 0
         assert __version__ in result.output
 
-    assert pkg_version("tcd") == __version__
+
+def test_pyproject_takes_its_version_from_the_package():
+    """The version must have exactly one source.
+
+    pyproject and __init__ previously both carried a literal and had drifted to
+    0.1.0 while the changelog was on 0.3.x. Asserting the *wiring* rather than
+    the installed metadata keeps this honest without depending on whether the
+    environment has been re-synced since the last bump.
+    """
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+
+    assert 'dynamic = ["version"]' in pyproject
+    assert '[tool.hatch.version]' in pyproject
+    assert 'path = "src/tcd/__init__.py"' in pyproject
+    assert "\nversion = " not in pyproject, "a literal version reintroduces the drift"
 
 
 @pytest.fixture()
