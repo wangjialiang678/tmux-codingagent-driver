@@ -178,8 +178,19 @@ def test_find_session_file_ignores_transcripts_older_than_the_job(tmp_path, monk
     assert provider.get_session_log_path(job) is None
 
 
-def test_encode_project_dir_matches_claude_layout():
-    assert (
-        ClaudeProvider.encode_project_dir("/Users/dev/my project.v2")
-        == "-Users-dev-my-project-v2"
-    )
+@pytest.mark.parametrize(
+    ("cwd", "expected"),
+    [
+        ("/Users/dev/my project.v2", "-Users-dev-my-project-v2"),
+        ("/Users/michael/OpenClaw", "-Users-michael-OpenClaw"),
+        # Verified against a real directory in ~/.claude/projects: the encoding
+        # is ASCII-only, so each CJK character becomes its own dash. A
+        # Unicode-aware isalnum() check would keep them and never find the dir.
+        (
+            "/Users/michael/projects/自用小工具/AI视频剪辑工具",
+            "-Users-michael-projects-------AI------",
+        ),
+    ],
+)
+def test_encode_project_dir_matches_claude_layout(cwd, expected):
+    assert ClaudeProvider.encode_project_dir(cwd) == expected

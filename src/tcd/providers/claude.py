@@ -23,6 +23,7 @@ CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 IDLE_THRESHOLD = 20.0  # seconds
 MODEL_RE = re.compile(r"^[a-zA-Z0-9._:/-]+$")
 QUEUED_MESSAGE_RE = re.compile(r"press\s+up\s+to\s+edit\s+queued\s+messages?", re.IGNORECASE)
+_NON_ASCII_ALNUM_RE = re.compile(r"[^A-Za-z0-9]")
 
 
 def has_queued_message_notice(pane: str) -> bool:
@@ -153,10 +154,13 @@ class ClaudeProvider(Provider):
     def encode_project_dir(cwd: str) -> str:
         """Mirror Claude Code's project-directory encoding for a working dir.
 
-        Claude stores transcripts under ~/.claude/projects/<encoded-cwd>/ where
-        the encoding replaces every non-alphanumeric character with '-'.
+        Claude stores transcripts under ~/.claude/projects/<encoded-cwd>/,
+        replacing every character outside [A-Za-z0-9] with '-'. The class is
+        ASCII-only: verified against a real directory, `/…/自用小工具/AI视频剪辑工具`
+        encodes to `…-projects-------AI------`, one dash per CJK character.
+        Using `str.isalnum()` here would keep those characters and never match.
         """
-        return "".join(c if c.isalnum() else "-" for c in cwd)
+        return _NON_ASCII_ALNUM_RE.sub("-", cwd)
 
     def _find_session_file(self, job: Job) -> Path | None:
         """Find the transcript for *this job* under ~/.claude/projects/.
