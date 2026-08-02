@@ -816,3 +816,211 @@ This fix round clarified the responsibility boundary between tcd and Skill:
 - Affected files: `src/tcd/worktree.py`, `src/tcd/cli.py`, `src/tcd/sdk.py`, `src/tcd/diagnostics.py`
 - New tests: `test_r2_stall_suppressed_when_pane_hash_changes`, `test_r2_stall_triggers_with_same_pane_hash`, `test_merge_command_no_new_commits`
 - Skill update: `~/.claude/skills/codex-worker/skill.md`
+
+---
+
+# 2026-08 Production Review (June–August usage)
+
+**Date**: 2026-08-03
+**Source**: audit of two months of orchestration transcripts (19 sessions that
+actually drove tcd) cross-checked against the code
+**Trigger**: a routine "is the repo up to date?" question
+
+Everything below was reproduced or evidenced before being filed. The prior
+report (2026-03) is a record of issues found *while* building tcd; this one is
+the first review driven by how tcd behaved in sustained production use.
+
+## Issue Overview
+
+| Priority | Issue | Status |
+|----------|-------|--------|
+| **P0** | Auto-stash popped by stack position, not by ref — parallel jobs swap each other's changes | **Fixed (2026-08-03)** |
+| **P0** | Auto-stash restored only by `tcd merge`; `tcd kill` stranded it | **Fixed (2026-08-03)** |
+| **P0** | `tcd kill` ran `git worktree remove --force`, discarding uncommitted agent work | **Fixed (2026-08-03)** |
+| P1 | `tcd clean` deleted the job record that is the only pointer to a worktree / stash | **Fixed (2026-08-03)** |
+| P1 | Job records never reconciled: phantom `running` jobs, elapsed measured against "now" | **Fixed (2026-08-03)** |
+| P1 | No detection of fatal provider-side errors (bad model id, upstream 5xx) | **Fixed (2026-08-03)** |
+| P1 | v0.3.2 launch hardening applied to Codex only; base-class defaults left other providers exposed | **Fixed (2026-08-03)** |
+| P2 | `--sandbox` accepted and echoed for providers that ignore it (same class as 2026-03 M-6) | **Fixed (2026-08-03)** |
+| P2 | Claude session lookup returned the globally newest transcript — usually the orchestrator's own | **Fixed (2026-08-03)** |
+| P2 | `--provider` choices hardcoded despite an existing registry | **Fixed (2026-08-03)** |
+| P2 | Activity extraction filtered chrome with Codex-only prefixes for every provider | **Fixed (2026-08-03)** |
+| P3 | Detection strings are coupled to upstream CLI wording with no drift alarm | Open — `tcd doctor` proposed |
+
+---
+
+## P0-1: Auto-stash Popped by Position
+
+**Evidence**
+
+Six stashes named `tcd: auto-stash before worktree`, dated 2026-07-24 to
+07-26, stranded across two repos driven by tcd (four in one, two in another).
+The largest held 7 files, +513/-95 lines of the user's uncommitted work.
+
+**Root Cause**
+
+`auto_stash()` captured the stash commit SHA and persisted it as
+`job.worktree_stash_ref`, but `stash_pop()` ran a bare `git stash pop` — the
+*top* of the stack. The ref was only ever read as a boolean
+(`if job.worktree_stash_ref:`). Since the stash stack is repo-wide and tcd's
+headline feature is parallel worktree jobs, job A's merge restored whichever
+stash happened to be on top — often job B's.
+
+**Fix**
+
+`find_stash_selector()` re-resolves the SHA to its current `stash@{n}`
+position immediately before popping (positions shift on every push/pop). A ref
+that is no longer on the stack now returns False loudly instead of popping
+something else.
+
+**Generalisable rule**: if you record an identifier, operate with it. Any
+"top of the stack / most recent / the default one" operation is a race as soon
+as the system supports concurrency.
+
+---
+
+## P0-2: Cleanup Wired to One Exit Path
+
+**Root Cause**
+
+`tcd start --worktree` mutates the caller's environment (stash, worktree,
+branch, tmux session). Restoration lived only in `tcd merge`. But a job has
+five exits: merge, kill, clean, timeout, crash. The observed July workflow —
+`git merge --ff-only tcd/<id>` with raw git, then `tcd kill` — never touched
+the restore path.
+
+**Fix**
+
+`_restore_auto_stash()` runs on kill as well as merge, guarded by
+`job.worktree_stash_restored` so the two paths cannot double-pop.
+
+**Generalisable rule**: a side effect applied at start needs a defined
+disposition on *every* terminal path, not just the successful one.
+
+---
+
+## P0-3: `tcd kill` Destroyed Uncommitted Agent Work
+
+**Root Cause**
+
+`remove_worktree()` uses `git worktree remove --force`, and `_kill_job()`
+called it unconditionally. "The AI forgets to commit" is a failure mode this
+very document recorded in 2026-03 (P0-3 of the previous report) — but that was
+mitigated only at the prompt layer, while the destructive path was untouched.
+
+**Fix**
+
+Kill now checks `worktree_is_dirty()` and `branch_has_new_commits()` first; a
+worktree holding either is kept, with its path and branch printed. `--force`
+restores the old behaviour.
+
+**Generalisable rule**: mitigating a failure at the input layer does not make
+the destructive path safe. Fix the class, not the instance.
+
+---
+
+## P1-1: Job Records Never Reconciled
+
+**Evidence**
+
+`tcd jobs` at audit time: 81 job records, 54 marked `running`, against 9 live
+tmux sessions — 45 phantoms. The oldest reported 30 days of elapsed time.
+
+**Root Cause**
+
+`JobManager.list_jobs()` reads JSON without checking tmux liveness
+(`_refresh_status()` existed but no listing path called it), and `_elapsed()`
+computed `now - started_at` regardless of terminal state.
+
+**Fix**
+
+`tcd jobs` reconciles against a single `tmux list-sessions` call
+(`--no-reconcile` opts out), and `_elapsed()` stops at `completed_at`.
+
+**Generalisable rule**: state that mirrors an external process must be
+reconciled on read; a write-time snapshot always drifts.
+
+---
+
+## P1-2: Fatal Provider Errors Read as "working"
+
+**Evidence**
+
+- 2026-07-10: model id typo `gpt-5.6-luna` → Codex printed
+  `{"type":"invalid_request_error","status":400}` in the pane; tcd reported
+  `state: working` until timeout.
+- 2026-07-25: upstream 503 `biscuit_baker_service_me_circuit_open` with
+  `Reconnecting... 5/5`; again `state: working`, with `TURN0_STUCK` as the only
+  hint.
+
+**Fix**
+
+`Provider.detect_provider_error()` on the base class, surfaced as a
+`PROVIDER_ERROR` warning from `tcd check --json`.
+
+---
+
+## P1-3: Hardening Applied to One Provider
+
+**Root Cause**
+
+The v0.3.2 launch fixes were set as class attributes on `CodexProvider` only.
+The base class kept `tui_stable_secs = 0.0` and `verify_prompt_delivery =
+False`, so `claude` and `gemini` still had the exact prompt-drop bug that
+v0.3.2 spent a release fixing — and any new provider would inherit it too.
+
+**Fix**
+
+Safe values are now the base-class defaults; providers opt out rather than
+opt in.
+
+**Generalisable rule**: defaults should be the safe side. A default that
+reproduces a known bug guarantees the next implementer rediscovers it.
+
+---
+
+## Provider Parity (as of 2026-08-03)
+
+The architecture is provider-neutral (ABC + registry, almost no vendor leakage
+outside `providers/`), but coverage is not. Only the Codex path has sustained
+production use.
+
+| Capability | codex | claude | gemini |
+|---|---|---|---|
+| TUI stability gating | 2.5s | 2.0s (inherited) | 2.0s (inherited) |
+| Prompt-delivery verification | yes | inherited | inherited |
+| Startup auto-update suppressed | yes | — | — |
+| Trust dialog handled | yes | — | — |
+| MCP startup blocking avoided | yes | — | — |
+| `--sandbox` honoured | yes | rejected | rejected |
+| Queued-follow-up recovery | — | yes | — |
+| Session file located | yes | scoped to job | none (pane only) |
+
+The dashes are not bugs; they are untested territory. Anyone driving
+`claude` or `gemini` for real work should expect to find the equivalent of the
+v0.3.2 issues.
+
+---
+
+## P3 (Open): Detection Strings Have No Drift Alarm
+
+Every completion and readiness decision is a substring match against upstream
+TUI wording: `›` / `❯` / `Working (` / `esc to interrupt` /
+`Press up to edit queued messages` / exactly two `TCD_DONE` markers /
+a 50-line marker scan window. When an upstream CLI changes its wording these
+fail *silently* — the job reports working forever or idle immediately, and the
+caller only finds out at timeout.
+
+Proposed: `tcd doctor` — a smoke command that starts a throwaway session per
+provider and verifies the readiness indicator and prompt delivery still hold,
+so the assumptions can be re-validated after every upstream upgrade.
+
+---
+
+## References
+
+- Fix commit: `afdea4d`
+- Affected files: `src/tcd/worktree.py`, `src/tcd/cli.py`, `src/tcd/sdk.py`,
+  `src/tcd/job.py`, `src/tcd/provider.py`, `src/tcd/providers/claude.py`,
+  `src/tcd/providers/codex.py`, `src/tcd/tmux_adapter.py`
+- Tests: 290 passing (was 253)

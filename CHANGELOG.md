@@ -1,5 +1,76 @@
 # Changelog
 
+## v0.4.0 — 2026-08-03
+
+Data-safety release, from the first review of two months of sustained
+production use rather than of tcd's own development. Full write-up in
+[docs/workflow-issues.md](docs/workflow-issues.md#2026-08-production-review-juneaugust-usage).
+
+### Breaking
+
+- **`tcd kill` no longer discards a worktree that still holds work.** It ran
+  `git worktree remove --force`, throwing away whatever the agent had not
+  committed — and agents forgetting to commit is a failure mode this project
+  already documented. Kill now keeps a worktree with uncommitted changes or
+  unmerged commits and prints where it is. Pass `--force` for the old
+  behaviour.
+- **`--sandbox` is rejected by providers that ignore it.** Only Codex ever
+  applied it, but `tcd start` accepted it for any provider and echoed a
+  reassuring `Sandbox: ...` line. Providers now declare `supports_sandbox`, and
+  `claude` / `gemini` error out instead of silently dropping the flag.
+- **`tcd clean` skips jobs that still own resources.** The job record is the
+  only pointer to a worktree path and an auto-stash ref; deleting it stranded
+  them. Use `--force` to clean anyway.
+
+### Your uncommitted work comes back
+
+Six orphaned `tcd: auto-stash before worktree` stashes were found across two
+repos driven by tcd in July, one holding 7 files and +513 lines.
+
+- `stash_pop` popped the **top of the stack** while the job's own stash SHA sat
+  unused in `worktree_stash_ref`. The stash stack is repo-wide, so two
+  concurrent worktree jobs handed each other's changes back. The ref is now
+  re-resolved to its current `stash@{n}` position at pop time
+  (`find_stash_selector`), and a ref that is gone fails loudly instead of
+  popping whatever else is there.
+- The stash was restored only by `tcd merge`. `tcd kill` restores it too, with
+  `worktree_stash_restored` making the restore idempotent across both paths.
+
+### Job state is reconciled instead of assumed
+
+`tcd jobs` was reporting 54 `running` jobs against 9 live tmux sessions, the
+oldest claiming 30 days of runtime.
+
+- `tcd jobs` reconciles against a single `tmux list-sessions` call before
+  listing; `--no-reconcile` opts out.
+- `_elapsed` stops the clock at `completed_at` instead of measuring against
+  now.
+
+### Providers: fixes applied to the class, not the instance
+
+- **Launch hardening is now a base-class default.** v0.3.2's TUI stability
+  gating and prompt-delivery verification were set on `CodexProvider` only, so
+  `claude`, `gemini`, and any future provider silently re-inherited the
+  dropped-prompt bug. Safe values are the defaults; providers opt out.
+- **`Provider.detect_provider_error`** surfaces `PROVIDER_ERROR` from
+  `tcd check --json` when the pane shows a fatal API failure. A model-id typo
+  (400 `invalid_request_error`) and an upstream 503 reconnect loop both used to
+  report `state: working` until the timeout expired.
+- **Claude's session lookup is scoped to the job.** It returned the newest
+  `.jsonl` anywhere under `~/.claude/projects/`, which is the orchestrator's
+  own transcript whenever tcd is driven from inside a Claude Code session. Now
+  filtered by the job's project directory and start time.
+- `--provider` choices come from the registry instead of a hardcoded list, and
+  activity extraction no longer strips chrome using Codex-only prefixes for
+  every provider.
+
+### Tests
+
+290 passing (was 253), including the concurrency case that proves job A's
+stash survives job B's merge.
+
+---
+
 ## v0.3.3 — 2026-08-02
 
 Follow-up submission hardening, plus a real version number.
