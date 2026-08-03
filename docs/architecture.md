@@ -225,15 +225,29 @@ CLI 早已修掉那条路径。
 **breaking change**：`from tcd import TCD` 不再可用，机器可读接入改用
 `tcd start --json` + `tcd check --json` + `tcd verify --json`。
 
-### 4.2 资源生命周期是"每个命令自己记得清理"（P0）
+> **2026-08-04 评审结论**（Codex gpt-5.6-sol xhigh 对 A–G 七条提案的对抗性评审）：
+> 大部分提案**不值得现在做**，而评审在代码里找到的 5 个真实缺陷优先级高于全部提案，
+> 已在 v0.6.0 修复（见 [workflow-issues.md](workflow-issues.md) 2026-08-04 段）。
+> 下面各条的判断已按评审结论更新。
+
+### 4.2 资源生命周期是"每个命令自己记得清理"（P1，方案已被推翻重来）
 
 worktree / 分支 / stash / tmux 会话四种资源，清理逻辑散落在 start 的回滚块、
 merge、kill、clean 五处。v0.4.0 把这五处补齐了，但**结构没变**——加第六条终止路径
 时，还是要靠人记得。
 
-**方向**：引入显式的资源持有模型（job 声明它持有哪些资源 + 每种资源的释放器），
-终止时统一遍历释放，而不是每个命令手写一遍。Codex 审查建议的"恢复状态机"
-(`pending/restoring/restored/needs_manual`) 是这个方向的一个具体形态。
+**原方案（通用 `ResourceSet` + `released` 布尔 + 插件式释放器）已被评审否决**，理由
+成立：
+- `release_all(job, force)` 表达不了现有语义——merge 的 `--no-cleanup` 仍要还 stash、
+  squash 与普通 merge 的分支策略不同、kill 默认必须保留脏 worktree、clean 根本不释放
+  只跳过。用一个 `force` 抹平这些差异，等于把安全策略藏进释放器。
+- `released: bool` 会制造**第二份真相**，直接违背不变量 3。现在的 `held_resources()`
+  至少是查外部实态。
+
+**修正后的方向**：`inspect_outstanding(job)`（每次向 tmux / git / stash 栈查实态，
+job 字段只表示 owner claim）+ `settle_resources(job, intent)`，`intent` 区分
+`START_ROLLBACK / MERGED / KILLED / RECOVER`。**获取侧的窗口比释放侧更危险**：
+stash 已产生但 ref 未存、worktree 已建但字段未存——先修这个，再谈统一释放。
 
 ### 4.3 "任务完成"没有进入架构（**已实现**，v0.5.0 验收契约）
 
@@ -282,24 +296,32 @@ stdin 关闭导致审批弹窗无人应答，调用被静默取消；唯一绕�
 
 这条因此**不是近期工作项**，而是一个有明确触发条件的观察项。
 
-### 4.5 Provider 能力靠 duck-typing 发现（P2）
+### 4.5 Provider 能力靠 duck-typing 发现（**不单独立项**）
 
 `hasattr(prov, "check_cli")`、`getattr(prov, "supports_sandbox", False)`、
 `hasattr(type(provider), "has_queued_message_notice")`——可选能力散落在调用点用
 反射发现。新 provider 漏实现不会报错，只会**静默少一层保护**，正是 §2 决策 4 的
 代价没有被架构挡住。
 
-**方向**：把这些提升为 ABC 上的显式声明（默认实现 + 能力标志），让"没实现"成为
-一个可见的事实而不是沉默的降级。
+**评审结论：不值得单开一次重构。** 主要目标其实已经达成——`tui_stable_secs`、
+`verify_prompt_delivery`、`working_markers`、`supports_sandbox` 四个安全关键项都已有
+基类默认（`provider.py:70-100`），测试也钉住了。剩余反射只有 `check_cli` 和 Claude
+特有的 queued-message notice，都不是事故来源。**将来碰 provider 层时顺手补两个基类
+默认即可**，不要引入 `Capabilities` 对象/枚举/feature registry。
 
-### 4.6 并发只在 stash 层被治理（P2）
+### 4.6 并发只在 stash 层被治理（P2，改为 D-lite）
 
 v0.4.0 加了仓库级 `flock` 保护 stash 栈，但更上层没有并发模型：两个 job 指向同一
 仓库、同一分支名、同一 worktree 路径时，没有统一的冲突检测；`--wt-name` 撞名只会
 在 `git worktree add` 时报错。
 
-**方向**：把"job 对资源的持有"做成可查询的（哪个 job 占着这个仓库/分支），冲突在
-`start` 阶段就拒绝，而不是在 git 层面炸出来。
+**评审修正**：查 job 记录再创建仍是 TOCTOU（两个 start 可同时查到空闲），而且互斥键
+不是"同一仓库"（同仓多 worktree 正是核心功能），而是 **canonical common repo +
+精确 branch/path**。git 本身已经对重复 branch/path 做原子拒绝，job 记录只能作为
+"可能属于哪个 job"的提示，不能作为放行真相——否则违背不变量 3。
+
+**D-lite**：①仓库锁身份规范化（**已于 v0.6.0 修复**）；②stash 之前做无副作用预检，
+冲突时给出清楚的错误和占用者提示；③真正的裁决仍交给 git。不引入通用 reservation。
 
 ### 4.7 文档结构本身（P2）
 
