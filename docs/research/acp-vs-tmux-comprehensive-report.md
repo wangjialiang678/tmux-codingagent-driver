@@ -1,3 +1,9 @@
+> ⚠️ **本文结论已被
+> [2026-08-structured-output-vs-screen-scraping.md](2026-08-structured-output-vs-screen-scraping.md)
+> 修正**：当年判断"tmux 更实用"是因为 ACP 仍在 alpha；现在的理由是 tmux 解决的是
+> 进程托管、结构化输出解决的是协议，二者互补而非竞争。保留本文是因为它仍是本仓
+> 唯一的 ACP 协议内部机制参考。
+
 # ACP (Agent Client Protocol) Deep Research Report
 
 **Project**: tmux-codingagent-driver (tcd)
@@ -877,5 +883,4 @@ Using Codex CLI as an example:
 - [Issue #29195: Codex silent permission failure](https://github.com/openclaw/openclaw/issues/29195)
 
 ### This Project
-- [tcd PRD](../prd.md)
-- [tcd design document](../design.md)
+- [tcd 架构文档](../architecture.md)（已取代当年的 prd.md / design.md）

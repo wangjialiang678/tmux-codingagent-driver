@@ -1,35 +1,18 @@
 # tcd 文档索引
 
-**当前版本 v0.4.0。** 下面标注 ⚠️ 的文档写于 2026-03 的 v0.1.0 时期，其中的行为
-描述已与代码不符，保留仅作历史记录。**有冲突时以「当前」区的文档为准。**
-
-## 当前（维护中）
+**当前版本 v0.4.0。** 这里只保留仍然成立的文档。2026-03 的 v0.1.0 时期文档
+（prd.md / design.md / scenarios.md / integration-guide.md / prd-worktree.md /
+prd-event-log.md、各类过程记录、四份竞品调研）已删除——它们描述的行为与代码多处
+冲突，**过时的设计文档比没有文档更危险**。有效内容已吸收进 architecture.md，
+原文可在 git 历史中找回。
 
 | 文档 | 内容 |
 |---|---|
-| [architecture.md](architecture.md) | **从这里开始**。需求、四个关键设计决策及其代价、技术架构、架构债与改进方向、不变量清单 |
+| [architecture.md](architecture.md) | **从这里开始**。需求与定位、四个关键设计决策及其代价、技术架构与 job 生命周期、事件日志、架构债与改进方向、七条不变量 |
 | [workflow-issues.md](workflow-issues.md) | 事故与修复登记册。2026-03 段是开发期问题，2026-08 段是两个月生产使用后的复盘 |
-| [../CHANGELOG.md](../CHANGELOG.md) | 版本变更，含 breaking change |
-| [../README.md](../README.md) | 命令速查与用法 |
+| [feature-request-parallel-batch-start.md](feature-request-parallel-batch-start.md) | 未实现的提案：`tcd batch` 批量并行启动。原定 v0.4.0，未纳入 |
+| [research/2026-08-structured-output-vs-screen-scraping.md](research/2026-08-structured-output-vs-screen-scraping.md) | 检测层调研。结论：交互式为主、结构化为辅，含重新评估的触发条件 |
+| [research/acp-vs-tmux-comprehensive-report.md](research/acp-vs-tmux-comprehensive-report.md) | ACP 协议深度调研（2026-03）。**结论已被上一篇修正**，保留是因为它仍是本仓唯一的 ACP 协议参考 |
 
-## 历史（v0.1.0 时期，⚠️ 描述已过时）
-
-| 文档 | 仍然有价值的部分 | 已过时的部分 |
-|---|---|---|
-| ⚠️ [prd.md](prd.md) | 问题定义、竞品对比、为什么选 tmux | 命令行为、状态模型、"IMPLEMENTED v0.1.0" |
-| ⚠️ [design.md](design.md) | 分层图的骨架仍成立 | 具体模块职责已变（新增 readiness / doctor / submission_recovery） |
-| ⚠️ [scenarios.md](scenarios.md) | 使用场景的意图 | 所有命令示例（缺 `--force`、`doctor`，且示范了已知有害的用法） |
-| ⚠️ [integration-guide.md](integration-guide.md) | 两种集成模式的划分 | 建议写进 CLAUDE.md 的命令清单已过时 |
-| ⚠️ [prd-worktree.md](prd-worktree.md) | worktree 隔离的设计意图 | **stash 处理方式已完全重写**（v0.4.0 按 ref 恢复 + 仓库锁） |
-| ⚠️ [prd-event-log.md](prd-event-log.md) | 事件日志的设计 | 事件类型有新增 |
-| ⚠️ [feature-request-parallel-batch-start.md](feature-request-parallel-batch-start.md) | 未实现的提案，仍可参考 | — |
-
-## 过程记录（不需要维护）
-
-`code-review.md` / `dev-log.md` / `fix-report.md` / `log-analysis.md` /
-`quickstart-test.md` / `test-plan*.md` / `workflow-log.md` / `research/` —
-某次具体工作的快照，读时按时间戳理解。
-
-`research/acp-vs-tmux-comprehensive-report.md` 值得特别注意：它是在各家 CLI 的
-headless / 结构化输出模式成熟**之前**做的结论，如果要重新评估传输层
-（见 architecture.md §4.4），需要重做而不是直接引用。
+仓库根目录还有 [README.md](../README.md)（命令速查与用法）和
+[CHANGELOG.md](../CHANGELOG.md)（版本变更，含 breaking change）。

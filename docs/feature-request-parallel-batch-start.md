@@ -1,7 +1,7 @@
 # Feature Request: Batch Parallel Worktree Job Launch (`tcd batch`)
 
-**Status**: Proposed
-**Target version**: v0.4.0
+**Status**: Proposed — **not implemented as of v0.4.0**
+**Target version**: unscheduled (originally aimed at v0.4.0, which shipped without it)
 **Filed by**: Power user (feishu-cli MCP server project)
 **Date**: 2026-03-10
 

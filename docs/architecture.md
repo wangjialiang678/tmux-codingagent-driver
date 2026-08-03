@@ -2,9 +2,9 @@
 
 **版本**: v0.4.0 · **更新**: 2026-08-03 · **状态**: 权威文档
 
-本文是 tcd 的需求、设计思路与技术架构的**当前**说明。`docs/` 下的 prd.md /
-design.md / scenarios.md 等写于 2026-03 的 v0.1.0 时期，保留作历史记录，遇到冲突
-以本文为准（见 [docs/README.md](README.md)）。
+本文是 tcd 的需求、设计思路与技术架构的**唯一权威说明**。2026-03 的 v0.1.0 时期
+文档（prd.md / design.md / scenarios.md 等）已删除，其中仍成立的内容已吸收进本文，
+原文可在 git 历史中找回（见 [docs/README.md](README.md)）。
 
 ---
 
@@ -20,6 +20,16 @@ design.md / scenarios.md 等写于 2026-03 的 v0.1.0 时期，保留作历史�
 API，驱动 CLI 本身。
 
 一句话：**tmux 是总线，AI CLI 是工人，tcd 是调度器。**
+
+### 1.1.1 为什么不用现成方案（2026-03 逐个否决，结论仍成立）
+
+| 方案 | 否决理由 |
+|---|---|
+| claude_code_bridge (CCB) | 架构太重（daemon / TCP / worker pool），耦合紧，无法独立使用 |
+| codex-orchestrator | 只支持 Codex，TypeScript 实现，驱动不了 Claude / Gemini |
+| 直接调 API | 每次重传全量上下文，token 浪费严重；用不上 CLI 的文件操作能力 |
+| 手工多终端 | 不可编程、无法自动化、人力成本高 |
+| tmux-bridge（同仓姊妹项目） | 单任务驱动器，没有 job 队列 / provider 注册表 / 多轮会话；tcd 是它的上层 |
 
 ### 1.2 使用者
 
@@ -125,7 +135,7 @@ bug"。v0.4.0 把安全值提为基类默认，改成 provider **主动退出**�
 │  基础设施                                                 │
 │    tmux_adapter.py  会话生命周期、send-keys、capture-pane  │
 │    worktree.py      worktree / 分支 / stash + 仓库级锁     │
-│    event_log.py     每 job 一份 append-only JSONL          │
+│    event_log.py     每 job 一份 append-only JSONL（见 §3.5）│
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -163,6 +173,21 @@ start ──► 建 job 记录 ──► auto_stash(打 job id 标签) ──►
 
 stash 栈是**仓库级共享**且**位置寻址**的，所以并发 job 必须靠仓库级 `flock`
 串行化"解析位置 → pop"，并用 job id 标签识别自己的条目，不能读栈顶。
+
+### 3.5 事件日志
+
+每个 job 一份 append-only JSONL（`~/.tcd/jobs/<id>.events.jsonl`），`tcd log <id>`
+查看。设计意图：job.json 是**当前状态**，事件流是**发生过什么**——排查"它到底卡在
+哪一步"时只有后者管用。
+
+当前事件类型（以代码为准，`grep -ro 'emit([^,]*, "[^"]*"' src/`）：
+
+| 阶段 | 事件 |
+|---|---|
+| 创建 | `job.created`、`job.stashed`、`job.worktree_created` |
+| 启动 | `job.tui_ready` / `job.tui_timeout`、`job.prompt_sent`、`job.prompt_confirmed` / `job.prompt_resend` / `job.prompt_unconfirmed` |
+| 运行 | `job.checked`、`job.turn_complete`、`job.message_submit_retry` |
+| 收尾 | `job.killed`、`job.worktree_merged`、`job.worktree_removed` / `job.worktree_kept`、`job.stash_restored` / `job.stash_restore_failed`、`job.reconciled` |
 
 ### 3.4 完成语义（重要缺口）
 
