@@ -27,17 +27,23 @@ tcd 没有人类界面，它的用户是**另一个 agent**：
 
 | 调用方 | 通过什么 | 典型场景 |
 |---|---|---|
-| Claude Code | bash 调 CLI | 把后端任务派给 Codex，自己做前端 |
+| Claude Code（人口头指派） | bash 调 CLI | 把后端任务派给 Codex，自己做前端 |
 | auto-dev skill | bash 调 CLI | PRD → 并行 worktree 开发 → 集成验证 |
-| Python 编排脚本 | `from tcd import TCD` | 批量任务、定时任务 |
+| ~~Python 编排脚本~~ | ~~`from tcd import TCD`~~ | 实测无人使用，见 §4.1 |
 
 这决定了两条设计约束：**输出必须机器可读**（`--json`），**退出码必须有语义**。
+
+更一般地说，tcd 是**一个 agent 通过 tmux 调用另一个 agent 的通用机制**，用来解决
+通用工程问题——不限于"多 AI 并行编程"这一个场景。**它是要给别人用的**（PRD 里
+"个人工具级别""不做社区运营"两条已作废），所以接口稳定性和开箱可用的权重要高于
+早期文档的设定。
 
 ### 1.3 不做什么
 
 - 不做 agent（不写代码、不做判断，只搬运）
 - 不管"任务是否完成"——只管"这一轮对话是否结束"（见 §3.4，这是个已知缺口）
 - 不做跨机器调度、不做队列、不做鉴权
+- 不做外部通知渠道（飞书等）——所有交互留在调用它的主 agent 里，这样别人装上就能用
 
 ---
 
@@ -172,15 +178,17 @@ auto-dev 一套）。**这个语义缺口目前由约定填补，不由架构填
 
 按"改动收益 / 改动风险"排序。**这一节是本文的重点。**
 
-### 4.1 CLI 与 SDK 是两份并行实现（P0，最高杠杆）
+### 4.1 CLI 与 SDK 是两份并行实现（P2，砍掉 SDK 即可）
 
 `cli.py`(1100+ 行) 和 `sdk.py`(600+ 行) 各自实现了 start / merge / kill / clean
 的完整逻辑。本次修复的每一个 bug 都要**改两遍**，而历史上它们已经漂移过：
 readiness 的修复曾只进了 SDK，CLI 那条路没拿到；`TCD.clean()` 绕过了 CLI 的资源
 保护。
 
-**方向**：SDK 成为唯一实现，CLI 退化成参数解析 + 输出格式化的薄壳。这一条能同时
-消灭"两处漂移"这一整类 bug，是投入产出比最高的重构。
+**方向（2026-08-03 与作者确认后修正）**：实际用法只有两条，**都走 CLI**——auto-dev
+里派发，和人在 Claude Code 里口头要求派发。SDK 不是主路径。所以正确解法是
+**砍掉 SDK 或把它降级成对 CLI 的薄封装**，而不是让 CLI 去适配一个没人用的接口。
+"两处漂移"这类 bug 依然要根除，但代价小得多。
 
 ### 4.2 资源生命周期是"每个命令自己记得清理"（P0）
 
@@ -192,26 +200,35 @@ merge、kill、clean 五处。v0.4.0 把这五处补齐了，但**结构没变**
 终止时统一遍历释放，而不是每个命令手写一遍。Codex 审查建议的"恢复状态机"
 (`pending/restoring/restored/needs_manual`) 是这个方向的一个具体形态。
 
-### 4.3 "任务完成"没有进入架构（P1，产品价值最高）
+### 4.3 "任务完成"没有进入架构（**P0**，直接对应核心假设）
 
 现状：tcd 只报 turn 空闲，验收全靠调用方约定。结果是同一套"检查交付物"的逻辑在
 codex-worker skill、auto-dev 里各写了一遍，且都可能被 LLM 跳过。
 
 **方向**：让调用方在 `start` 时声明**验收契约**——必须存在的文件、必须退出 0 的
 命令、分支必须有新 commit——由 tcd 在判定 idle 后自动执行并给出
-`task_state: complete | incomplete`。这把一个反复重犯的约定变成能力，也让
-`tcd check` 的输出对编排方真正可用。
+`task_state: complete | incomplete`。
+
+**为什么是 P0**：作者确认的第一性假设是"**凡是可以自我验证的任务，AI 就能自动完成，
+不需要人参与**"。验收契约就是这条假设在底座层的实现——没有它，"闭环"只是"跑完了"，
+而跑完但不敢用，人还是要回来检查，注意力照样被拉走。
+
+Codex 的 `--output-schema` 已经提供了一半（约束最终产出符合 JSON Schema），不用自研。
 
 ### 4.4 检测层与 TUI 文案强耦合（P1，长期风险）
 
 §2 决策 1 的代价。`tcd doctor` 只能告诉你"假设可能失效了"，无法自愈。
 
-**方向**：分级传输。现在 codex / claude / gemini 都有了结构化的非交互模式
-（`codex exec`、`claude -p --output-format=stream-json` 等），可以做成
-**能力探测 + 优雅降级**：有结构化输出就走结构化，没有才回落 tmux 抓屏。这会把
-最脆的一层从"所有 provider 的所有判定"缩小到"只有老 CLI 才需要"。
-仓库里 `docs/research/acp-vs-tmux-comprehensive-report.md` 做过相关调研，但那是
-headless 模式成熟之前的结论，**值得重新评估**。
+**方向（已调研，见
+[research/2026-08-structured-output-vs-screen-scraping.md](research/2026-08-structured-output-vs-screen-scraping.md)）**：
+不是"tmux vs headless"，而是**tmux 继续做进程托管、结构化模式做协议**——在 tmux
+会话里跑 CLI 的结构化模式，读 JSONL 事件流而不是抓屏。tcd 现在抓屏推断的每一件事
+（turn 结束、上下文超限、API 报错、活动行）在三家 CLI 里都已有一等事件。
+
+采用**分级 + 能力探测**：L1 结构化优先，L2 回落现在的交互式实现。L2 必须保留——
+`codex exec` 会自动取消 MCP 工具调用（[openai/codex#24135](https://github.com/openai/codex/issues/24135)），
+而 tcd 特意保留了 `context7` MCP。建议从 gemini / claude 起步（无此阻塞），codex
+维持 L2 直到上游修复。
 
 ### 4.5 Provider 能力靠 duck-typing 发现（P2）
 
