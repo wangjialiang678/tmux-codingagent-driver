@@ -215,7 +215,7 @@ codex-worker skill、auto-dev 里各写了一遍，且都可能被 LLM 跳过。
 
 Codex 的 `--output-schema` 已经提供了一半（约束最终产出符合 JSON Schema），不用自研。
 
-### 4.4 检测层与 TUI 文案强耦合（P1，长期风险）
+### 4.4 检测层与 TUI 文案强耦合（P2 观察项，长期风险）
 
 §2 决策 1 的代价。`tcd doctor` 只能告诉你"假设可能失效了"，无法自愈。
 
@@ -225,10 +225,23 @@ Codex 的 `--output-schema` 已经提供了一半（约束最终产出符合 JSO
 会话里跑 CLI 的结构化模式，读 JSONL 事件流而不是抓屏。tcd 现在抓屏推断的每一件事
 （turn 结束、上下文超限、API 报错、活动行）在三家 CLI 里都已有一等事件。
 
-采用**分级 + 能力探测**：L1 结构化优先，L2 回落现在的交互式实现。L2 必须保留——
-`codex exec` 会自动取消 MCP 工具调用（[openai/codex#24135](https://github.com/openai/codex/issues/24135)），
-而 tcd 特意保留了 `context7` MCP。建议从 gemini / claude 起步（无此阻塞），codex
-维持 L2 直到上游修复。
+**决定（2026-08-03）：交互式仍是默认，结构化作为辅助路径，未来验证后再考虑提权。**
+
+理由是 `codex exec` 会自动取消 MCP 工具调用
+（[openai/codex#24135](https://github.com/openai/codex/issues/24135)，未修复）——
+stdin 关闭导致审批弹窗无人应答，调用被静默取消；唯一绕法是
+`--dangerously-bypass-approvals-and-sandbox`，等于连沙箱一起关。而 tcd 特意保留了
+`context7` MCP 供 headless 编码查库文档。**换句话说，主力路径（codex）恰好是受阻
+最重的那个**，此时把结构化设为默认没有收益只有风险。
+
+所以：
+
+- **默认不变**：交互式 TUI + 现有检测，配 `tcd doctor` 让假设可检验
+- **结构化作为可选路径**先在 gemini / claude 上试（它们无此阻塞，且恰好是目前支持
+  最弱的两个），验证事件流解析这套架构是否可靠
+- 上游修复 #24135、或试点结果足够好之后，再讨论是否提为默认
+
+这条因此**不是近期工作项**，而是一个有明确触发条件的观察项。
 
 ### 4.5 Provider 能力靠 duck-typing 发现（P2）
 

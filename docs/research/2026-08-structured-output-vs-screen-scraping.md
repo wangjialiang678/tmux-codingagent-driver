@@ -150,12 +150,16 @@ tcd 要的是 agent↔agent 的批量派发；而且要多一层适配器依赖�
 
 ## 四、建议路线
 
-**分级传输 + 能力探测**，而不是一刀切：
+**采纳决定（2026-08-03）：交互式为主（默认），结构化为辅（未来测试）。**
 
-| 级别 | 做法 | 适用 |
+| 级别 | 做法 | 定位 |
 |---|---|---|
-| **L1 结构化** | tmux 里跑 `codex exec --json` / `claude -p --output-format stream-json` / `gemini --output-format stream-json`，解析 JSONL | 默认首选 |
-| **L2 交互式** | 现在的实现：TUI + 子串匹配 | provider 不支持结构化，或需要 MCP（见 3.1），或需要 turn 中途干预 |
+| **交互式** | 现在的实现：TUI + 子串匹配 + `tcd doctor` 自检 | **默认，保持不变** |
+| **结构化** | tmux 里跑 `codex exec --json` / `claude -p --output-format stream-json` / `gemini --output-format stream-json`，解析 JSONL | **辅助路径，先在 gemini/claude 试点** |
+
+不把结构化设为默认的理由很直接：**受 §3.1 那个 MCP 阻塞影响最重的恰恰是 codex，
+而 codex 是主力 provider**。主力路径拿不到好处、还要牺牲沙箱或查文档能力，此时切换
+默认值是负收益。
 
 配套改动：
 
@@ -166,9 +170,13 @@ tcd 要的是 agent↔agent 的批量派发；而且要多一层适配器依赖�
 3. **`--output-schema` 直接用于验收契约**（架构文档 §4.3），不用自研。
 4. **L2 保留不删**：MCP 阻塞项没解决前，codex + MCP 的组合仍需交互式路径。
 
-**先做哪个**：建议从 **gemini 或 claude 开始**做 L1（它们没有 MCP 阻塞），验证事件
-流解析这套架构，codex 保持 L2 直到 #24135 有进展。这样风险最小，而且恰好先补上了
-覆盖最差的两个 provider（见架构文档的 provider 能力表）。
+**试点顺序**：gemini 或 claude 先做（无 MCP 阻塞，且恰好是目前支持最弱的两个），
+验证事件流解析这套架构是否可靠。codex 维持交互式。
+
+**重新评估的触发条件**（满足任一再讨论提权为默认）：
+1. [openai/codex#24135](https://github.com/openai/codex/issues/24135) 被修复
+2. gemini/claude 试点稳定运行一段时间且明显优于抓屏
+3. 某家上游 CLI 改了 TUI 文案导致现有检测失效（届时被迫加速）
 
 ---
 
