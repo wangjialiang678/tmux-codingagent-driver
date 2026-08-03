@@ -4,6 +4,10 @@ Drive AI CLI tools (Codex, Claude Code, Gemini CLI) programmatically via tmux.
 
 tcd launches AI coding agents in detached tmux sessions, injects prompts, detects turn completion, and collects responses — enabling higher-level orchestration systems to coordinate multiple AI agents.
 
+> **设计文档**：[docs/architecture.md](docs/architecture.md) — 需求、四个关键设计
+> 决策及其代价、技术架构、架构债与不变量。`docs/` 下其余文档的现状见
+> [docs/README.md](docs/README.md)。
+
 ## Features
 
 - **Multi-provider support**: Codex, Claude Code, Gemini CLI
