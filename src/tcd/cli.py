@@ -14,6 +14,7 @@ from pathlib import Path
 import click
 
 from tcd import __version__
+from tcd.acceptance import evaluate as evaluate_acceptance, has_contract
 from tcd.collector import ResponseCollector
 from tcd.config import ensure_dirs, job_signal_path
 from tcd.diagnostics import Warning as DiagnosticWarning, diagnose
@@ -116,6 +117,12 @@ def doctor(live: bool, provider: str | None, timeout: int, as_json: bool):
 @click.option("--sandbox", default=None, help="Sandbox mode (providers that support it; Codex only today).")
 @click.option("--worktree", is_flag=True, default=False, help="Run in a git worktree for isolation.")
 @click.option("--wt-name", default=None, help="Custom worktree branch name (default: job ID).")
+@click.option("--require-file", "require_files", multiple=True,
+              help="Acceptance: this file must exist when the turn goes idle (repeatable).")
+@click.option("--require-cmd", "require_cmds", multiple=True,
+              help="Acceptance: this command must exit 0 when the turn goes idle (repeatable).")
+@click.option("--require-commit", is_flag=True, default=False,
+              help="Acceptance: the worktree branch must carry commits beyond HEAD.")
 def start(
     provider: str,
     prompt: str,
@@ -125,8 +132,17 @@ def start(
     sandbox: str | None,
     worktree: bool,
     wt_name: str | None,
+    require_files: tuple[str, ...],
+    require_cmds: tuple[str, ...],
+    require_commit: bool,
 ):
-    """Start a new AI job."""
+    """Start a new AI job.
+
+    The --require-* options declare an acceptance contract: what must be true
+    for the task to count as done. A turn going idle is not the same thing —
+    agents go idle mid-task — so `tcd verify` and `tcd check --json` evaluate
+    the contract rather than trusting idleness.
+    """
     tmux = _get_tmux()
 
     # Read from stdin if prompt is '-'
@@ -174,7 +190,17 @@ def start(
 
     # Create job
     mgr = JobManager()
-    job = mgr.create_job(provider, prompt, cwd, model=model, timeout_minutes=timeout, sandbox=sandbox)
+    if require_commit and not worktree:
+        click.echo("Error: --require-commit needs --worktree (there is no branch otherwise).", err=True)
+        sys.exit(1)
+
+    job = mgr.create_job(
+        provider, prompt, cwd,
+        model=model, timeout_minutes=timeout, sandbox=sandbox,
+        acceptance_files=list(require_files),
+        acceptance_commands=list(require_cmds),
+        acceptance_require_commit=require_commit,
+    )
     logger.info("start %s: provider=%s cwd=%s sandbox=%s worktree=%s", job.id, provider, cwd, sandbox, worktree)
 
     if worktree:
@@ -547,12 +573,67 @@ def check(job_id: str, as_json: bool):
             "pane_tail": pane_tail,
             "activity": activity_lines,
         }
+        # Turn idle is not task complete. When a contract was declared, say so
+        # explicitly rather than leaving the caller to infer it from `state`.
+        if has_contract(job):
+            if state == "idle":
+                payload.update(evaluate_acceptance(job).to_dict())
+            else:
+                payload["task_state"] = "unchecked"
         note = _running_idle_note(job)
         if note:
             payload["state_note"] = note
         click.echo(json.dumps(payload, ensure_ascii=False))
 
     sys.exit(exit_code)
+
+
+# ---------------------------------------------------------------------------
+# tcd verify
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.argument("job_id")
+@click.option("--json", "as_json", is_flag=True, help="Output the verdict as JSON.")
+def verify(job_id: str, as_json: bool):
+    """Check a job against its acceptance contract.
+
+    Answers "is the task done", which `tcd check` does not: check reports
+    whether the current turn is idle, and agents go idle mid-task. Declare the
+    contract with `tcd start --require-file/--require-cmd/--require-commit`.
+
+    Exit codes: 0=complete, 1=incomplete, 2=no contract declared, 3=not found
+    """
+    mgr = JobManager()
+    job = mgr.load_job(job_id)
+    if job is None:
+        if as_json:
+            click.echo(json.dumps({"task_state": "not_found", "checks": []}))
+        else:
+            click.echo(f"Error: job {job_id!r} not found.", err=True)
+        sys.exit(3)
+
+    result = evaluate_acceptance(job)
+
+    if as_json:
+        click.echo(json.dumps(result.to_dict(), ensure_ascii=False))
+    else:
+        click.echo(f"{job.id}: {result.summary()}")
+        for check in result.checks:
+            mark = "PASS" if check.ok else "FAIL"
+            line = f"  [{mark}] {check.kind}: {check.target}"
+            if check.detail:
+                line += f" — {check.detail}"
+            click.echo(line)
+
+    if result.state == "unchecked":
+        if not as_json:
+            click.echo(
+                "Declare one with `tcd start --require-file ... --require-cmd ...`.",
+                err=True,
+            )
+        sys.exit(2)
+    sys.exit(0 if result.complete else 1)
 
 
 # ---------------------------------------------------------------------------

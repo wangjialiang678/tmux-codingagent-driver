@@ -100,6 +100,16 @@ tcd kill <job_id> --force
 # auto-stash are skipped, because the job record is the only pointer to them.
 tcd clean
 
+# Declare what "done" means, then have tcd decide — instead of trusting that
+# an idle turn means a finished task (it does not; agents go idle mid-task).
+tcd start -p codex -m - -d /project --worktree \
+  --require-file src/feature.py \
+  --require-cmd "pytest tests/test_feature.py -q" \
+  --require-commit < prompt.txt
+
+tcd verify <job_id>          # exit 0=complete, 1=incomplete, 2=no contract
+tcd verify <job_id> --json   # {"task_state": "...", "checks": [...]}
+
 # Check that the pane strings tcd matches on still hold. Run after upgrading
 # Codex / Claude Code / Gemini CLI — when their TUI wording changes, detection
 # fails silently rather than loudly.
@@ -173,6 +183,7 @@ for job_id in [auth_job.id, api_job.id]:
 | `tcd attach <job_id>` | Attach to tmux session (debugging) |
 | `tcd kill <job_id> [--all] [--force]` | Kill running job(s); keeps a worktree holding unsaved work unless `--force` |
 | `tcd clean [--all] [--force]` | Clean finished jobs; skips jobs still owning a worktree or stash unless `--force` |
+| `tcd verify <job_id> [--json]` | Check the job against its acceptance contract — "is the task done", not "is the turn idle" |
 | `tcd doctor [--live] [--provider P] [--timeout N] [--json]` | Check that tcd's provider detection assumptions still hold |
 
 ### Start Options
@@ -282,8 +293,9 @@ When tasks can be delegated to another AI agent:
    follow-ups until killed
 
 Turn idle is not task complete: agents spawn their own sub-agents and can go
-idle mid-task. Verify against the deliverables you asked for, and use `tcd send`
-to resume the same session rather than starting over.
+idle mid-task. Declare the deliverables with `--require-*` at start and let
+`tcd verify` decide, and use `tcd send` to resume the same session rather than
+starting over.
 ```
 
 ## Development

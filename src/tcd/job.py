@@ -55,6 +55,11 @@ class Job:
     worktree_path: str | None = None
     worktree_branch: str | None = None
     worktree_repo_root: str | None = None
+    # Acceptance contract: what must be true for the task to count as done.
+    # tcd's own signal is "turn went idle", which is not the same thing.
+    acceptance_files: list[str] = field(default_factory=list)
+    acceptance_commands: list[str] = field(default_factory=list)
+    acceptance_require_commit: bool = False
     worktree_stash_ref: str | None = None
     # Set once the auto-stash has been restored, so merge and kill can each
     # attempt the restore without popping the same stash twice.
@@ -96,6 +101,9 @@ class JobManager:
         model: str | None = None,
         timeout_minutes: int = 60,
         sandbox: str | None = None,
+        acceptance_files: list[str] | None = None,
+        acceptance_commands: list[str] | None = None,
+        acceptance_require_commit: bool = False,
     ) -> Job:
         job_id = _generate_id()
         tmux_session = f"tcd-{provider}-{job_id}"
@@ -109,6 +117,9 @@ class JobManager:
             model=model,
             timeout_minutes=timeout_minutes,
             sandbox=sandbox,
+            acceptance_files=list(acceptance_files or []),
+            acceptance_commands=list(acceptance_commands or []),
+            acceptance_require_commit=acceptance_require_commit,
         )
         self.save_job(job)
         logger.info("Created job %s (provider=%s)", job_id, provider)

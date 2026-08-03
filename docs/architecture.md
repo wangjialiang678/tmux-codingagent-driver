@@ -189,13 +189,20 @@ stash 栈是**仓库级共享**且**位置寻址**的，所以并发 job 必须�
 | 运行 | `job.checked`、`job.turn_complete`、`job.message_submit_retry` |
 | 收尾 | `job.killed`、`job.worktree_merged`、`job.worktree_removed` / `job.worktree_kept`、`job.stash_restored` / `job.stash_restore_failed`、`job.reconciled` |
 
-### 3.4 完成语义（重要缺口）
+### 3.4 完成语义：turn vs task
 
-tcd 只有一个概念：**turn（一轮对话）**。`tcd check` 退出 0 = 这一轮空闲了。
+tcd 原本只有一个概念：**turn（一轮对话）**。`tcd check` 退出 0 = 这一轮空闲了。
 
 但调用方要的是**任务完成**，二者不等价：agent 会自己 spawn 子代理、会写完测试就
-停在空输入框。于是每个调用方都要自己发明验收逻辑（codex-worker skill 一套、
-auto-dev 一套）。**这个语义缺口目前由约定填补，不由架构填补**——见 §4.3。
+停在空输入框。v0.5.0 起这个语义进入架构：
+
+| 问题 | 命令 | 依据 |
+|---|---|---|
+| 这一轮结束了吗 | `tcd check` | pane 文本 / 信号文件 |
+| **任务做完了吗** | **`tcd verify`** | **调用方声明的验收契约** |
+
+契约在 `start` 时声明（`--require-file` / `--require-cmd` / `--require-commit`），
+由 tcd 评估——**任何"完成条件能被写成判据"的任务，都不再需要人来确认**。
 
 ---
 
@@ -225,14 +232,18 @@ merge、kill、clean 五处。v0.4.0 把这五处补齐了，但**结构没变**
 终止时统一遍历释放，而不是每个命令手写一遍。Codex 审查建议的"恢复状态机"
 (`pending/restoring/restored/needs_manual`) 是这个方向的一个具体形态。
 
-### 4.3 "任务完成"没有进入架构（**P0**，直接对应核心假设）
+### 4.3 "任务完成"没有进入架构（**已实现**，v0.5.0 验收契约）
 
 现状：tcd 只报 turn 空闲，验收全靠调用方约定。结果是同一套"检查交付物"的逻辑在
 codex-worker skill、auto-dev 里各写了一遍，且都可能被 LLM 跳过。
 
-**方向**：让调用方在 `start` 时声明**验收契约**——必须存在的文件、必须退出 0 的
-命令、分支必须有新 commit——由 tcd 在判定 idle 后自动执行并给出
-`task_state: complete | incomplete`。
+**实现**（v0.5.0）：调用方在 `start` 时声明契约——`--require-file`（文件必须存在）、
+`--require-cmd`（命令必须退出 0）、`--require-commit`（分支必须有超出 HEAD 的 commit）。
+`tcd verify <job>` 给出判定（退出码 0=complete / 1=incomplete / **2=没声明契约** /
+3=not found），`tcd check --json` 在 idle 时附带 `task_state` 与逐条 `checks`。
+
+关键取舍：**"没有契约"是独立的退出码 2，不是 0**。如果没声明也返回成功，这个能力就
+会变成又一个"看起来验过了"的假象——正是它要消灭的东西。
 
 **为什么是 P0**：作者确认的第一性假设是"**凡是可以自我验证的任务，AI 就能自动完成，
 不需要人参与**"。验收契约就是这条假设在底座层的实现——没有它，"闭环"只是"跑完了"，

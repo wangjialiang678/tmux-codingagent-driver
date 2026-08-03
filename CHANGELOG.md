@@ -1,5 +1,49 @@
 # Changelog
 
+## v0.5.0 — 2026-08-03
+
+Acceptance contracts: tcd can now answer "is the task done", not only "is the
+turn idle".
+
+### The gap this closes
+
+tcd's native unit is a turn, and a turn going idle is not a finished task —
+agents spawn sub-agents and return to an empty prompt mid-work. Every caller
+was reinventing "check the deliverables" as a convention (the codex-worker
+skill had one, auto-dev had another), and conventions get skipped. Anything a
+task can be judged by belongs in the tool.
+
+### Declaring a contract
+
+```bash
+tcd start -p codex -m - -d /project --worktree \
+  --require-file src/feature.py \
+  --require-cmd "pytest tests/test_feature.py -q" \
+  --require-commit < prompt.txt
+```
+
+- `--require-file` — the file must exist (repeatable)
+- `--require-cmd` — the command must exit 0, run in the job's working directory
+  with a 120s timeout (repeatable)
+- `--require-commit` — the worktree branch must carry commits beyond HEAD;
+  catches the documented failure of an agent doing the work and never
+  committing it
+
+### Reading the verdict
+
+`tcd verify <job_id>` — exit **0**=complete, **1**=incomplete, **2**=no
+contract declared, **3**=not found. `--json` gives `task_state` plus a
+per-clause `checks` array naming what failed and why.
+
+`tcd check --json` now also carries `task_state` once the turn is idle and a
+contract exists.
+
+**"No contract" is exit 2, deliberately not 0.** Returning success when nothing
+was checked would make this feature another way to look verified without being
+verified — precisely what it exists to prevent.
+
+---
+
 ## v0.4.0 — 2026-08-03
 
 Data-safety release, from the first review of two months of sustained

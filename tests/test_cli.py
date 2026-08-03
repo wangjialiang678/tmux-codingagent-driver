@@ -699,3 +699,63 @@ def test_clean_guidance_does_not_point_at_force(runner, tmp_jobs, monkeypatch):
     result = runner.invoke(cli, ["clean"])
     assert "tcd merge" in result.output
     assert "tcd kill" in result.output
+
+
+# ---------------------------------------------------------------------------
+# tcd verify — "is the task done", separate from "is the turn idle"
+# ---------------------------------------------------------------------------
+
+def test_verify_reports_complete(runner, tmp_jobs, tmp_path):
+    job = _create_test_job(tmp_jobs, status="running")
+    job.cwd = str(tmp_path)
+    (tmp_path / "deliverable.py").write_text("x")
+    job.acceptance_files = ["deliverable.py"]
+    JobManager().save_job(job)
+
+    result = runner.invoke(cli, ["verify", job.id])
+    assert result.exit_code == 0
+    assert "passed" in result.output
+
+
+def test_verify_reports_incomplete_with_the_failing_clause(runner, tmp_jobs, tmp_path):
+    job = _create_test_job(tmp_jobs, status="running")
+    job.cwd = str(tmp_path)
+    job.acceptance_files = ["missing.py"]
+    JobManager().save_job(job)
+
+    result = runner.invoke(cli, ["verify", job.id])
+    assert result.exit_code == 1
+    assert "FAIL" in result.output
+    assert "missing.py" in result.output
+
+
+def test_verify_distinguishes_no_contract_from_success(runner, tmp_jobs):
+    """Exit 0 must mean "verified done", never "nothing was checked"."""
+    job = _create_test_job(tmp_jobs, status="running")
+
+    result = runner.invoke(cli, ["verify", job.id])
+    assert result.exit_code == 2
+    assert "no acceptance contract" in result.output
+
+
+def test_verify_missing_job(runner, tmp_jobs):
+    result = runner.invoke(cli, ["verify", "deadbeef"])
+    assert result.exit_code == 3
+
+
+def test_verify_json_shape(runner, tmp_jobs, tmp_path):
+    job = _create_test_job(tmp_jobs, status="running")
+    job.cwd = str(tmp_path)
+    job.acceptance_commands = ["exit 0"]
+    JobManager().save_job(job)
+
+    result = runner.invoke(cli, ["verify", job.id, "--json"])
+    payload = json.loads(result.output)
+    assert payload["task_state"] == "complete"
+    assert payload["checks"][0]["kind"] == "command"
+
+
+def test_start_rejects_require_commit_without_worktree(runner, tmp_jobs):
+    result = runner.invoke(cli, ["start", "-p", "codex", "-m", "x", "--require-commit"])
+    assert result.exit_code == 1
+    assert "needs --worktree" in result.output
