@@ -335,6 +335,9 @@ def remove_worktree(worktree_path: str | Path) -> bool:
 
 
 class MergeResult:
+    # NOTE: `git merge --squash` stages changes without creating a commit, so a
+    # successful squash leaves the work in the index only. Callers must commit
+    # before treating the branch as merged — see cli.merge.
     """Result of a merge_branch() call."""
 
     def __init__(self, success: bool, *, noop: bool = False, stdout: str = "", stderr: str = ""):

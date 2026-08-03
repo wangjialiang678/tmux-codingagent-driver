@@ -21,7 +21,6 @@ tcd launches AI coding agents in detached tmux sessions, injects prompts, detect
 - **Drift detection**: `tcd doctor` re-verifies the pane strings tcd matches on, which upstream CLI upgrades break silently
 - **Token tracking**: Cumulative token usage recording (Codex)
 - **Verbose logging**: `-v`/`-vv` for INFO/DEBUG level diagnostics
-- **Python SDK**: Programmatic access for agent orchestration
 - **CLI interface**: Full CLI for interactive use and scripting
 
 ## Requirements
@@ -119,52 +118,6 @@ tcd doctor --live --provider codex
 # Enable verbose logging
 tcd -v start -p codex -m "..." -d .    # INFO level
 tcd -vv check <job_id>                  # DEBUG level
-```
-
-### Python SDK
-
-```python
-from tcd import TCD
-
-tcd = TCD()
-
-# Start a job
-job = tcd.start("claude", "Fix the bug in main.py", cwd="/path/to/project")
-
-# Wait for completion (blocks)
-result = tcd.wait(job.id, timeout=300)
-print(f"State: {result.state}")
-
-# Get output
-output = tcd.output(job.id)
-print(output)
-
-# Multi-turn conversation
-tcd.send(job.id, "Now add tests for the fix")
-result = tcd.wait(job.id, timeout=300)
-
-# Clean up
-tcd.kill(job.id)
-tcd.clean()
-```
-
-### Parallel Jobs with Worktrees
-
-```python
-from tcd import TCD
-
-tcd = TCD()
-
-# Launch parallel jobs in isolated worktrees
-auth_job = tcd.start("codex", "Implement auth module", cwd="/project",
-                     worktree=True, worktree_name="auth")
-api_job = tcd.start("codex", "Implement API layer", cwd="/project",
-                    worktree=True, worktree_name="api")
-
-# Wait for both, then merge
-for job_id in [auth_job.id, api_job.id]:
-    tcd.wait(job_id, timeout=600)
-    tcd.merge_worktree(job_id)
 ```
 
 ## CLI Reference
@@ -308,7 +261,6 @@ pip install -e ".[dev]"
 python -m pytest tests/ -q
 
 # Run a specific test file
-python -m pytest tests/test_sdk.py -q
 ```
 
 ## License

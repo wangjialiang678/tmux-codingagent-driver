@@ -1,5 +1,52 @@
 # Changelog
 
+## v0.6.0 — 2026-08-04
+
+A review of the proposed refactor backlog (Codex gpt-5.6-sol, xhigh) found five
+real defects ranking above every proposal on the list — including one shipped
+hours earlier that left auto-dev's default dispatch unable to start at all.
+Those are fixed here; most of the backlog was judged not worth doing.
+
+### Breaking
+
+- **The Python SDK is removed.** `from tcd import TCD` no longer exists. It had
+  become a second product with different behaviour: no acceptance contracts,
+  refusing dirty repos instead of auto-stashing, restoring the stash on kill
+  only while `worktree_path` survived, no tmux reconciliation in `jobs()`, and
+  a `clean()` that bypassed the resource guard entirely — a documented way
+  around every invariant the CLI enforces. Machine-readable access is
+  `tcd start --json`, `tcd check --json`, `tcd verify --json`.
+- **`tcd check` exits 4 for a failed job** (was 0). Callers reading only the
+  exit code — aggregators especially — scored failures as success.
+- **`tcd merge --squash` stops before cleanup.** `git merge --squash` stages
+  without committing, so reporting the branch merged and then deleting the
+  worktree and force-deleting the branch left the only copy of the work in the
+  index. It now tells you to commit, and keeps the source until you do.
+
+### Fixed
+
+- **`--require-commit` works when the caller owns the worktree.** It required a
+  tcd-created branch, while auto-dev deliberately creates its own worktree and
+  must not let tcd nest a second one — so auto-dev's documented dispatch was
+  rejected outright by tcd. HEAD is now recorded at dispatch and acceptance
+  asks whether it moved.
+- **Rollback kills the tmux session first.** A failure after session creation
+  removed the worktree while the agent kept running inside a deleted directory.
+- **The repo lock is keyed on the git common directory.** Hashing the caller's
+  path gave a main checkout and a linked worktree different locks — so the
+  repo-level stash lock was not repo-level exactly where parallel worktree jobs
+  run, which is the case it exists for.
+- **`merge` kills the session, and `clean` counts a live session as a held
+  resource.** merge marked jobs completed while leaving the session running,
+  and clean would then delete the only record naming it.
+
+### Added
+
+- `tcd start --json` — job id, cwd, session, worktree and acceptance baseline
+  as data. Scripts previously had to grep `Job started: <id>` out of human text.
+
+353 tests pass before the SDK removal; 302 after (51 SDK tests deleted).
+
 ## v0.5.0 — 2026-08-03
 
 Acceptance contracts: tcd can now answer "is the task done", not only "is the

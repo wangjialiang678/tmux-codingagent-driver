@@ -153,8 +153,47 @@ def test_require_commit_passes_once_work_is_committed(git_repo):
     assert evaluate(job).state == "complete"
 
 
-def test_require_commit_without_branch_fails_loudly(tmp_path):
+def test_require_commit_without_branch_or_baseline_fails_loudly(tmp_path):
+    """Neither shape available means we cannot tell — that is a failure, not a pass."""
     result = evaluate(_job(tmp_path, acceptance_require_commit=True))
 
     assert result.state == "incomplete"
-    assert "no worktree branch" in result.checks[0].detail
+    assert "no dispatch baseline" in result.checks[0].detail
+
+
+# ---------------------------------------------------------------------------
+# Caller-owned worktree: auto-dev creates its own, so tcd must not require a
+# branch of its own to judge whether the agent committed
+# ---------------------------------------------------------------------------
+
+def _head(repo) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def test_require_commit_uses_dispatch_baseline_when_caller_owns_the_worktree(git_repo):
+    job = Job(
+        id="job1", provider="codex", status="running", prompt="t",
+        cwd=str(git_repo), tmux_session="s",
+        acceptance_require_commit=True,
+        acceptance_base_commit=_head(git_repo),
+    )
+
+    unchanged = evaluate(job)
+    assert unchanged.state == "incomplete"
+    assert "HEAD unchanged" in unchanged.checks[0].detail
+
+    (git_repo / "feature.py").write_text("x\n")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-qm", "feat"], cwd=git_repo, check=True, capture_output=True)
+
+    assert evaluate(job).state == "complete"
+
+
+def test_require_commit_reports_non_git_cwd(tmp_path):
+    job = _job(tmp_path, acceptance_require_commit=True, acceptance_base_commit="a" * 40)
+    result = evaluate(job)
+
+    assert result.state == "incomplete"
+    assert "not a git repository" in result.checks[0].detail

@@ -20,10 +20,34 @@ def ensure_dirs() -> None:
 
 
 def repo_lock_path(repo_path: str | Path) -> Path:
-    """Lock file guarding one repo's stash stack against concurrent jobs."""
-    import hashlib
+    """Lock file guarding one repo's stash stack against concurrent jobs.
 
-    digest = hashlib.sha256(str(Path(repo_path).resolve()).encode()).hexdigest()[:16]
+    Keyed on the git *common* directory, not the caller's path: a main checkout
+    and a linked worktree of the same repository share one stash stack but
+    resolve to different paths, so hashing the path handed them different locks
+    — meaning the repo-level lock was not repo-level exactly where worktree
+    jobs, the reason it exists, are running.
+    """
+    import hashlib
+    import subprocess
+
+    key = str(Path(repo_path).resolve())
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        # Tolerate anything that does not behave like CompletedProcess: failing
+        # to take a lock is far worse than taking a slightly narrower one.
+        if getattr(result, "returncode", 1) == 0 and getattr(result, "stdout", "").strip():
+            key = str(Path(result.stdout.strip()).resolve())
+    except Exception:
+        pass  # fall back to the path; a private lock beats no lock
+
+    digest = hashlib.sha256(key.encode()).hexdigest()[:16]
     return LOCKS_DIR / f"repo-{digest}.lock"
 
 

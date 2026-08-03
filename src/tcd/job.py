@@ -60,6 +60,10 @@ class Job:
     acceptance_files: list[str] = field(default_factory=list)
     acceptance_commands: list[str] = field(default_factory=list)
     acceptance_require_commit: bool = False
+    # HEAD at dispatch time. Lets --require-commit work when the *caller* owns
+    # the worktree (auto-dev does), by asking "did HEAD move" instead of
+    # requiring tcd to have created a branch of its own.
+    acceptance_base_commit: str | None = None
     worktree_stash_ref: str | None = None
     # Set once the auto-stash has been restored, so merge and kill can each
     # attempt the restore without popping the same stash twice.
@@ -170,10 +174,19 @@ class JobManager:
         """
         from pathlib import Path
 
+        from tcd.tmux_adapter import TmuxAdapter
         from tcd.worktree import stash_exists
+
+        try:
+            live_sessions = TmuxAdapter().list_sessions()
+        except Exception:
+            live_sessions = set()
 
         held: list[tuple[str, str]] = []
         for job in self.list_jobs():
+            if job.tmux_session in live_sessions:
+                held.append((job.id, f"tmux session {job.tmux_session} still alive"))
+                continue
             if job.worktree_path and Path(job.worktree_path).exists():
                 held.append((job.id, f"worktree still at {job.worktree_path}"))
                 continue

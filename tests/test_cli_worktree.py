@@ -245,10 +245,16 @@ def test_merge_command_squash(runner, tmp_jobs, tmp_path, monkeypatch):
     result = runner.invoke(cli, ["merge", job.id, "--squash", "--no-cleanup"])
     assert result.exit_code == 0
     merge_branch_mock.assert_called_once_with(repo_root, "tcd/test-branch", strategy="squash")
-    assert "(squash)" in result.output
+    assert "Squashed" in result.output
+    assert "Commit it" in result.output
 
 
-def test_merge_command_squash_cleanup_forces_branch_delete(runner, tmp_jobs, tmp_path, monkeypatch):
+def test_merge_command_squash_keeps_the_source_until_it_is_committed(runner, tmp_jobs, tmp_path, monkeypatch):
+    """`git merge --squash` stages without committing.
+
+    Deleting the worktree and force-deleting the branch at that point would
+    leave the only copy of the work in the index, one `git reset` from gone.
+    """
     repo_root = tmp_path / "repo"
     worktree_path = tmp_path / "repo-wt-test"
     repo_root.mkdir()
@@ -266,9 +272,15 @@ def test_merge_command_squash_cleanup_forces_branch_delete(runner, tmp_jobs, tmp
 
     result = runner.invoke(cli, ["merge", job.id, "--squash"])
     assert result.exit_code == 0
+    assert "Squashed" in result.output
+    assert "Commit it" in result.output
 
-    remove_worktree_mock.assert_called_once_with(str(worktree_path))
-    delete_branch_mock.assert_called_once_with(repo_root, "tcd/test-branch", force=True)
+    remove_worktree_mock.assert_not_called()
+    delete_branch_mock.assert_not_called()
+
+    updated = JobManager().load_job(job.id)
+    assert updated.worktree_path == str(worktree_path)
+    assert updated.worktree_branch == "tcd/test-branch"
 
 
 def test_merge_command_conflict(runner, tmp_jobs, tmp_path, monkeypatch):

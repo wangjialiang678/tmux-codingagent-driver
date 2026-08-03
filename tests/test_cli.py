@@ -755,7 +755,68 @@ def test_verify_json_shape(runner, tmp_jobs, tmp_path):
     assert payload["checks"][0]["kind"] == "command"
 
 
-def test_start_rejects_require_commit_without_worktree(runner, tmp_jobs):
-    result = runner.invoke(cli, ["start", "-p", "codex", "-m", "x", "--require-commit"])
+def test_start_rejects_require_commit_outside_a_git_repo(runner, tmp_jobs, tmp_path):
+    result = runner.invoke(cli, ["start", "-p", "codex", "-m", "x", "-d", str(tmp_path), "--require-commit"])
     assert result.exit_code == 1
-    assert "needs --worktree" in result.output
+    assert "needs a git repository" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Terminal-state hygiene
+# ---------------------------------------------------------------------------
+
+def test_check_does_not_report_a_failed_job_as_exit_zero(runner, tmp_jobs):
+    """Exit 0 for a failed job scores as success in any aggregator."""
+    job = _create_test_job(tmp_jobs, status="failed")
+
+    result = runner.invoke(cli, ["check", job.id])
+    assert result.exit_code == 4
+
+
+def test_check_still_reports_completed_as_zero(runner, tmp_jobs):
+    job = _create_test_job(tmp_jobs, status="completed")
+
+    result = runner.invoke(cli, ["check", job.id])
+    assert result.exit_code == 0
+
+
+def test_clean_keeps_jobs_whose_tmux_session_is_still_alive(runner, tmp_jobs, monkeypatch):
+    """merge marks a job completed without killing its session."""
+    job = _create_test_job(tmp_jobs, status="completed")
+
+    class FakeTmux:
+        def list_sessions(self):
+            return {job.tmux_session}
+
+    monkeypatch.setattr("tcd.tmux_adapter.TmuxAdapter", lambda: FakeTmux())
+
+    result = runner.invoke(cli, ["clean"])
+    assert result.exit_code == 0
+    assert "Cleaned 0 job(s)." in result.output
+    assert "still alive" in result.output
+    assert JobManager().load_job(job.id) is not None
+
+
+def test_start_json_emits_machine_readable_job(runner, tmp_jobs, monkeypatch):
+    class FakeProvider:
+        tui_ready_indicator = "READY"
+        def check_cli(self): return None
+        def build_launch_command(self, job): return "fake"
+        def build_prompt_wrapper(self, message, req_id): return message
+
+    class FakeTmux:
+        def create_session(self, session, cmd, cwd): return True
+        def capture_pane(self, session, **kwargs): return "READY"
+        def send_enter(self, session): return True
+        def send_text(self, session, text): return True
+
+    monkeypatch.setattr("tcd.cli._get_tmux", lambda: FakeTmux())
+    monkeypatch.setattr("tcd.cli.get_provider", lambda provider: FakeProvider())
+    monkeypatch.setattr("tcd.cli.time.sleep", lambda _s: None)
+
+    result = runner.invoke(cli, ["start", "-p", "codex", "-m", "hi", "-d", "/tmp", "--json"])
+    assert result.exit_code == 0
+
+    payload = json.loads(result.output)
+    assert payload["job_id"] == JobManager().list_jobs()[0].id
+    assert payload["tmux_session"].startswith("tcd-codex-")

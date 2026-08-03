@@ -120,26 +120,65 @@ def _run_command(cmd: str, workdir: Path) -> Check:
 
 
 def _check_commit(job: Job) -> Check:
-    """Require the job's worktree branch to carry work not already on HEAD."""
-    if not job.worktree_branch:
-        return Check("commit", "-", False, "job has no worktree branch")
+    """Require the agent to have actually committed something.
 
+    Two shapes, because worktree ownership differs by caller:
+
+    * tcd owns the worktree — compare the job's branch against HEAD.
+    * the caller owns it (auto-dev creates its own worktree and must *not* let
+      tcd nest a second one) — compare the working dir's HEAD against the commit
+      recorded at dispatch. Requiring a tcd-created branch here is what broke
+      auto-dev's default dispatch outright.
+    """
     from tcd.worktree import branch_has_new_commits, get_main_repo_root
 
-    try:
-        repo_root = (
-            Path(job.worktree_repo_root)
-            if job.worktree_repo_root
-            else get_main_repo_root(job.cwd)
+    if job.worktree_branch:
+        try:
+            repo_root = (
+                Path(job.worktree_repo_root)
+                if job.worktree_repo_root
+                else get_main_repo_root(job.cwd)
+            )
+            has_new = branch_has_new_commits(repo_root, job.worktree_branch)
+        except Exception as exc:
+            logger.warning("acceptance %s: commit check failed", job.id, exc_info=True)
+            return Check("commit", job.worktree_branch, False, f"could not compare: {exc}")
+        return Check(
+            "commit",
+            job.worktree_branch,
+            has_new,
+            "" if has_new else "no commits beyond HEAD (agent likely never committed)",
         )
-        has_new = branch_has_new_commits(repo_root, job.worktree_branch)
-    except Exception as exc:
-        logger.warning("acceptance %s: commit check failed", job.id, exc_info=True)
-        return Check("commit", job.worktree_branch, False, f"could not compare: {exc}")
 
-    return Check(
-        "commit",
-        job.worktree_branch,
-        has_new,
-        "" if has_new else "no commits beyond HEAD (agent likely never committed)",
-    )
+    if not job.acceptance_base_commit:
+        return Check(
+            "commit", "-", False,
+            "no branch and no dispatch baseline recorded — cannot tell whether anything was committed",
+        )
+
+    head = current_head(job.cwd)
+    if head is None:
+        return Check("commit", job.acceptance_base_commit[:8], False, "cwd is not a git repository")
+    if head == job.acceptance_base_commit:
+        return Check(
+            "commit", head[:8], False,
+            "HEAD unchanged since dispatch (agent likely never committed)",
+        )
+    return Check("commit", f"{job.acceptance_base_commit[:8]}..{head[:8]}", True)
+
+
+def current_head(path: str) -> str | None:
+    """Resolve HEAD for *path*, or None when it is not a git repository."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None

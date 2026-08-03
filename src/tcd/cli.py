@@ -14,7 +14,7 @@ from pathlib import Path
 import click
 
 from tcd import __version__
-from tcd.acceptance import evaluate as evaluate_acceptance, has_contract
+from tcd.acceptance import current_head, evaluate as evaluate_acceptance, has_contract
 from tcd.collector import ResponseCollector
 from tcd.config import ensure_dirs, job_signal_path
 from tcd.diagnostics import Warning as DiagnosticWarning, diagnose
@@ -122,7 +122,8 @@ def doctor(live: bool, provider: str | None, timeout: int, as_json: bool):
 @click.option("--require-cmd", "require_cmds", multiple=True,
               help="Acceptance: this command must exit 0 when the turn goes idle (repeatable).")
 @click.option("--require-commit", is_flag=True, default=False,
-              help="Acceptance: the worktree branch must carry commits beyond HEAD.")
+              help="Acceptance: the agent must commit (branch ahead of HEAD, or HEAD moved since dispatch).")
+@click.option("--json", "as_json", is_flag=True, help="Emit the started job as JSON (machine-readable).")
 def start(
     provider: str,
     prompt: str,
@@ -135,6 +136,7 @@ def start(
     require_files: tuple[str, ...],
     require_cmds: tuple[str, ...],
     require_commit: bool,
+    as_json: bool,
 ):
     """Start a new AI job.
 
@@ -190,10 +192,6 @@ def start(
 
     # Create job
     mgr = JobManager()
-    if require_commit and not worktree:
-        click.echo("Error: --require-commit needs --worktree (there is no branch otherwise).", err=True)
-        sys.exit(1)
-
     job = mgr.create_job(
         provider, prompt, cwd,
         model=model, timeout_minutes=timeout, sandbox=sandbox,
@@ -201,6 +199,20 @@ def start(
         acceptance_commands=list(require_cmds),
         acceptance_require_commit=require_commit,
     )
+
+    if require_commit:
+        # Record HEAD now so acceptance can ask "did the agent commit anything"
+        # even when the *caller* owns the worktree — which auto-dev does, and
+        # which requiring --worktree here would have made impossible.
+        base = current_head(cwd)
+        if base is None:
+            click.echo(
+                "Error: --require-commit needs a git repository at the working directory.",
+                err=True,
+            )
+            sys.exit(1)
+        job.acceptance_base_commit = base
+        mgr.save_job(job)
     logger.info("start %s: provider=%s cwd=%s sandbox=%s worktree=%s", job.id, provider, cwd, sandbox, worktree)
 
     if worktree:
@@ -221,7 +233,8 @@ def start(
             job.worktree_stash_ref = stash_ref
             job.worktree_repo_root = repo_root
             mgr.save_job(job)
-            click.echo(f"Stashed uncommitted changes ({stash_ref[:8]}).")
+            if not as_json:
+                click.echo(f"Stashed uncommitted changes ({stash_ref[:8]}).")
             logger.info("start %s: auto-stashed dirty state, ref=%s", job.id, stash_ref)
             emit(job.id, "job.stashed", ref=stash_ref)
 
@@ -297,11 +310,25 @@ def start(
                 markers=getattr(prov, "working_markers", WORKING_MARKERS),
             )
 
-        click.echo(f"Job started: {job.id}")
-        click.echo(f"Provider: {provider}")
-        if job.sandbox:
-            click.echo(f"Sandbox: {job.sandbox}")
-        click.echo(f"tmux session: {job.tmux_session}")
+        if as_json:
+            # Callers that script tcd need to read the job id without grepping
+            # human text; a scraped id is one more silent drift point.
+            click.echo(json.dumps({
+                "job_id": job.id,
+                "provider": provider,
+                "cwd": job.cwd,
+                "tmux_session": job.tmux_session,
+                "sandbox": job.sandbox,
+                "worktree_path": job.worktree_path,
+                "worktree_branch": job.worktree_branch,
+                "acceptance_base_commit": job.acceptance_base_commit,
+            }, ensure_ascii=False))
+        else:
+            click.echo(f"Job started: {job.id}")
+            click.echo(f"Provider: {provider}")
+            if job.sandbox:
+                click.echo(f"Sandbox: {job.sandbox}")
+            click.echo(f"tmux session: {job.tmux_session}")
     except Exception as exc:
         if job.status != "failed":
             job.status = "failed"
@@ -310,6 +337,15 @@ def start(
         if not job.completed_at:
             job.completed_at = _now_iso()
         mgr.save_job(job)
+
+        # Kill the session before touching the worktree: otherwise the agent
+        # keeps running with its cwd deleted out from under it.
+        try:
+            if tmux.session_exists(job.tmux_session):
+                tmux.kill_session(job.tmux_session)
+                emit(job.id, "job.killed", reason="start_rollback")
+        except Exception:
+            logger.warning("start %s: could not kill session during rollback", job.id, exc_info=True)
 
         if job.worktree_path and job.worktree_branch:
             try:
@@ -458,7 +494,10 @@ def log_events(job_id: str, tail: int | None, event_filter: str | None):
 def check(job_id: str, as_json: bool):
     """Non-blocking completion check.
 
-    Exit codes: 0=idle, 1=working, 2=context_limit, 3=not_found
+    Reports whether the current *turn* is idle. That is not the same as the task
+    being done — use `tcd verify` for that.
+
+    Exit codes: 0=idle/completed, 1=working, 2=context_limit, 3=not_found, 4=failed
     """
     mgr = JobManager()
     job = mgr.load_job(job_id)
@@ -485,7 +524,9 @@ def check(job_id: str, as_json: bool):
 
     if job.status in ("completed", "failed"):
         state = job.status
-        exit_code = 0
+        # A failed job is not "done, exit 0" — callers that only read the exit
+        # code (and aggregators especially) would score it as success.
+        exit_code = 4 if job.status == "failed" else 0
     else:
         # Check provider completion detection
         try:
@@ -935,6 +976,16 @@ def merge(job_id: str, squash: bool, no_cleanup: bool):
     logger.info("merge %s: merging branch=%s strategy=%s repo_root=%s", job.id, job.worktree_branch, strategy, repo_root)
     merge_result = merge_branch(repo_root, job.worktree_branch, strategy=strategy)
 
+    if squash and merge_result.success and not merge_result.noop:
+        # `git merge --squash` stages without committing. Declaring the job
+        # merged here — and then deleting the source branch and worktree —
+        # would leave the only copy of the work sitting in the index.
+        click.echo(f"Squashed {job.worktree_branch} into the index. Commit it, then re-run:")
+        click.echo(f"  git -C {repo_root} commit")
+        click.echo(f"  tcd kill {job.id} --force    # releases worktree, branch and stash")
+        emit(job.id, "job.worktree_merged", success=True, strategy=strategy, committed=False)
+        sys.exit(0)
+
     if not merge_result.success:
         logger.warning("merge %s: conflict on branch=%s", job.id, job.worktree_branch)
         click.echo(f"Merge conflict on {job.worktree_branch}. Resolve manually.", err=True)
@@ -952,6 +1003,16 @@ def merge(job_id: str, squash: bool, no_cleanup: bool):
     click.echo(f"Merged {job.worktree_branch} ({strategy}).")
     if merge_result.stdout:
         click.echo(merge_result.stdout)
+
+    # The session outlives the merge unless killed, and `clean` will then delete
+    # the record that names it.
+    try:
+        tmux = TmuxAdapter()
+        if tmux.session_exists(job.tmux_session):
+            tmux.kill_session(job.tmux_session)
+            emit(job.id, "job.killed", reason="merged")
+    except Exception:
+        logger.warning("merge %s: could not kill session %s", job.id, job.tmux_session, exc_info=True)
 
     # Mark job as completed after successful merge
     if job.status == "running":

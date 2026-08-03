@@ -16,7 +16,6 @@ uv sync
 uv run pytest tests/ -q
 
 # Run a single test file
-uv run pytest tests/test_sdk.py -q
 
 # Run a specific test
 uv run pytest tests/test_bridge_absorb.py::TestUtf8Chunks::test_cjk_not_split -v
@@ -32,13 +31,16 @@ uv run tcd --help
 
 ### Two Usage Modes
 
-1. **Full SDK**: `from tcd import TCD` - high-level orchestration (start/wait/check/output/send/kill)
+1. **CLI** (the only supported orchestration surface): `tcd start/check/verify/output/send/merge/kill`.
+   Machine-readable via `--json` on start/check/verify/jobs/status/doctor; exit codes carry meaning.
+   The Python SDK was removed in v0.6.0 — it had become a second product with
+   different behaviour that could bypass the resource-safety rules.
 2. **Lightweight import**: `from tcd.tmux_adapter import TmuxAdapter` - direct tmux operations without job management
 
 ### Module Dependency Flow
 
 ```
-cli.py (Click CLI) --> sdk.py (TCD class) --> job.py (Job + JobManager)
+cli.py (Click CLI) --> job.py (Job + JobManager)
                                           --> provider.py (ABC + registry)
                                           --> tmux_adapter.py (tmux primitives)
                                           --> collector.py (response collection)
@@ -81,11 +83,11 @@ Providers auto-register on import via `src/tcd/__init__.py`.
 - **UTF-8 chunking**: `send_keys` splits at character boundaries (4096 byte limit) to avoid cutting multi-byte chars.
 - **CaptureDepth enum**: Semantic constants (STATUS=20, HEALTH=50, CONTEXT=500, CHECKPOINT=2000, FULL=-1) instead of magic numbers.
 - **Atomic job persistence**: `JobManager.save_job()` uses write-to-temp + `os.replace()`.
-- **Trust dialog handling**: `sdk.py:_wait_for_tui()` auto-accepts trust prompts before injecting the first prompt.
+- **Trust dialog handling**: `readiness.py:wait_for_tui()` auto-accepts trust prompts before injecting the first prompt.
 
 ### Git Worktree Isolation
 
-`worktree.py` provides primitives for running parallel jobs in isolated git worktrees. The `cli.py` and `sdk.py` layers use these to:
+`worktree.py` provides primitives for running parallel jobs in isolated git worktrees. `cli.py` uses these to:
 - Create a worktree branch from HEAD (`create_worktree()`)
 - Track worktree metadata in the Job object (`worktree_path`, `worktree_branch`)
 - Merge completed work back (`merge_worktree()` with optional `--squash`)

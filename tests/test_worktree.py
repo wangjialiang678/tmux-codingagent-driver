@@ -383,3 +383,29 @@ def test_repo_lock_is_exclusive(git_repo: Path):
     t.join(timeout=5)
 
     assert order == ["first", "second"]
+
+
+def test_repo_lock_is_shared_between_main_checkout_and_linked_worktree(git_repo: Path):
+    """A worktree job locks from inside the worktree; the stash stack is shared.
+
+    Hashing the caller's path handed those two callers different locks, which
+    meant the repo-level lock was not repo-level exactly where the parallel
+    worktree jobs it exists for are running.
+    """
+    from tcd.config import repo_lock_path
+
+    wt = create_worktree(git_repo, "lock-identity")
+    try:
+        assert repo_lock_path(git_repo) == repo_lock_path(wt)
+    finally:
+        remove_worktree(wt)
+
+
+def test_repo_lock_differs_between_unrelated_repos(git_repo: Path, tmp_path: Path):
+    from tcd.config import repo_lock_path
+
+    other = tmp_path / "unrelated"
+    other.mkdir()
+    _run_git(other, "init", "-q")
+
+    assert repo_lock_path(git_repo) != repo_lock_path(other)
