@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.6.1 — 2026-08-19
+
+### Changed
+
+- Codex jobs now disable plugin and Apps features for the launched process by
+  default. Interactive plugin bundles were still contributing dozens of skill
+  descriptions after tcd disabled their MCP servers, causing the 2% skill
+  catalog warning and exposing unattended jobs to irrelevant workflow gates.
+  Set `TCD_CODEX_PLUGINS=1` to opt a specialized job back into plugin/app
+  capabilities. Persistent Codex configuration and interactive sessions are
+  unchanged.
+
 ## v0.6.0 — 2026-08-04
 
 A review of the proposed refactor backlog (Codex gpt-5.6-sol, xhigh) found five

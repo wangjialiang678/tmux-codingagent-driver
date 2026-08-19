@@ -49,6 +49,25 @@ def test_build_launch_command_disables_auto_update(provider, job):
     assert "check_for_update_on_startup=false" in provider.build_launch_command(job)
 
 
+def test_build_launch_command_disables_plugins_for_headless_jobs(
+    provider, job, monkeypatch
+):
+    monkeypatch.delenv("TCD_CODEX_PLUGINS", raising=False)
+    cmd = provider.build_launch_command(job)
+    assert "features.plugins=false" in cmd
+    assert "features.apps=false" in cmd
+
+
+@pytest.mark.parametrize("enabled", ["1", "true", "yes", "on", "TRUE"])
+def test_codex_plugins_can_be_enabled_explicitly(
+    provider, job, monkeypatch, enabled
+):
+    monkeypatch.setenv("TCD_CODEX_PLUGINS", enabled)
+    cmd = provider.build_launch_command(job)
+    assert "features.plugins=false" not in cmd
+    assert "features.apps=false" not in cmd
+
+
 def test_build_launch_command_pre_trusts_cwd(provider, job):
     cmd = provider.build_launch_command(job)
     assert "trust_level=" in cmd and "projects." in cmd

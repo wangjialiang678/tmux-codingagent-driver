@@ -35,6 +35,7 @@ tcd launches AI coding agents in detached tmux sessions, injects prompts, detect
 ### Provider auth notes
 
 - **Codex CLI** defaults to **ChatGPT Plus/Pro/Team subscription** auth (not API key). You must run `codex login` interactively once — it opens a browser and links your ChatGPT account. Credentials are cached in `~/.codex/auth.json`. Without this, tcd worktree jobs will hang at the login prompt and get killed by `TURN0_STUCK`. If you don't have a ChatGPT subscription, you can instead export `OPENAI_API_KEY=sk-...` (pay-per-token).
+- **Codex plugins/apps are disabled for tcd jobs by default.** Headless coding jobs do not need interactive plugin skills, and loading them consumes Codex's bounded skill catalog even when their MCP servers are disabled. Set `TCD_CODEX_PLUGINS=1` only for a job that explicitly needs installed plugin/app capabilities. This does not change interactive Codex or persistent `~/.codex/config.toml` state.
 - **Claude Code** requires completing the folder-trust dialog once. `tcd` auto-handles the trust prompt via its Provider trust dialog handler, but first-time auth (Anthropic account login) must be done manually.
 - **Gemini CLI** similarly requires initial Google account auth and may show a folder-trust dialog — tcd handles the latter automatically.
 

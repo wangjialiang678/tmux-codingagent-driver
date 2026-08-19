@@ -62,6 +62,12 @@ def _kept_mcp_servers() -> set[str]:
     return {s.strip() for s in raw.split(",") if s.strip()}
 
 
+def _codex_plugins_enabled() -> bool:
+    """Whether a headless Codex job should load interactive plugins/apps."""
+    raw = os.environ.get("TCD_CODEX_PLUGINS", "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def disabled_mcp_parts() -> list[str]:
     """Build ``-c mcp_servers.<name>.enabled=false`` args for every configured
     MCP server *except* those on the keep-list (see :data:`DEFAULT_MCP_KEEP`).
@@ -252,6 +258,14 @@ class CodexProvider(Provider):
             toml_path = canonical.replace("\\", "\\\\").replace('"', '\\"')
             trust_cfg = f'projects."{toml_path}".trust_level="trusted"'
             parts.append(f"-c {shlex.quote(trust_cfg)}")
+
+        # Interactive plugins contribute dozens of skill descriptions even
+        # when their MCP servers are disabled. That wastes the bounded skill
+        # catalog and can inject interactive workflow gates into unattended
+        # coding jobs. Keep them out by default; specialized jobs can opt in.
+        if not _codex_plugins_enabled():
+            parts.append("-c features.plugins=false")
+            parts.append("-c features.apps=false")
 
         # Disable the user's interactive MCP servers for this headless job so
         # Codex isn't blocked waiting for slow/failing servers to start.
