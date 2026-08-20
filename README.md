@@ -232,9 +232,9 @@ tcd status <job_id> --json # Includes total_tokens in JSON
 ## Upstream Agent Integration
 
 **Claude Code users**: install the battle-tested skill instead of hand-rolling the
-loop — `cp integrations/claude-code/SKILL.md ~/.claude/skills/codex-worker/SKILL.md`.
-It carries the dispatch/acceptance/runtime-verification discipline distilled from
-production runs; see [integrations/README.md](integrations/README.md).
+loop — `bash integrations/install.sh` (symlinks it, so `git pull` updates it in
+place). It carries the dispatch/acceptance/runtime-verification discipline
+distilled from production runs; see [integrations/README.md](integrations/README.md).
 
 Or add to your project's `CLAUDE.md` for agent-to-agent delegation:
 

@@ -7,13 +7,19 @@ tcd 本身是命令行工具，`--help` 就能看懂。但**驱动方 AI 需要�
 Claude Code 技能（`codex-worker`）。安装：
 
 ```bash
-mkdir -p ~/.claude/skills/codex-worker
-cp integrations/claude-code/SKILL.md ~/.claude/skills/codex-worker/SKILL.md
+bash integrations/install.sh
 ```
+
+装的是**软链接**（`~/.claude/skills/codex-worker/SKILL.md` → 本仓库文件），所以：
+
+- 以后 `git pull` 或本地改这份文件，Claude Code **立刻用上新版**，不需要重装
+- 反过来在会话里改技能，改的就是仓库文件，`git commit` 即可回流——不会再出现"两边不一致"
+- 已验证 Claude Code 的技能加载器正常跟随软链接（2026-08-20 实测加载成功）
+- 文件系统不支持软链接时脚本自动退回复制，并提示"更新后需重跑"
 
 新开会话后，说"派 Codex 做 X"即可自动触发。
 
-**本仓库是这份技能的版本源**：技能是从实战里长出来的（每条纪律背后都有一次翻车），改动请先改这里再同步到 `~/.claude/skills/`，别只改本机副本——本机 `.claude/` 不在版本控制里，只改那边等于没留下。
+**本仓库是这份技能的版本源**：技能是从实战里长出来的（每条纪律背后都有一次翻车）。本机 `.claude/` 不在版本控制里，所以真相放这边。
 
 技能里几条最贵的经验：
 
