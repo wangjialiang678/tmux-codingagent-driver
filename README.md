@@ -231,7 +231,12 @@ tcd status <job_id> --json # Includes total_tokens in JSON
 
 ## Upstream Agent Integration
 
-Add to your project's `CLAUDE.md` for agent-to-agent delegation:
+**Claude Code users**: install the battle-tested skill instead of hand-rolling the
+loop — `cp integrations/claude-code/SKILL.md ~/.claude/skills/codex-worker/SKILL.md`.
+It carries the dispatch/acceptance/runtime-verification discipline distilled from
+production runs; see [integrations/README.md](integrations/README.md).
+
+Or add to your project's `CLAUDE.md` for agent-to-agent delegation:
 
 ```markdown
 ## Multi-Agent via tcd
