@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.6.2 — 2026-09-07
+
+### Fixed
+
+- **Prompt delivery verification no longer mistakes a pasted prompt for a
+  submitted one.** `verify_prompt_delivery()` used "is the prompt text visible
+  in the pane" as its success test. Visible text only proves the bracketed
+  paste landed in the composer — not that the turn started. When a slow TUI
+  ate the trailing Enter (seen with Codex 0.153.4), the job sat at
+  `turn_count=0` for 46 minutes while tcd reported delivery as confirmed.
+  The check now returns three states — `running` / `pasted` / `absent` — and
+  only a provider working marker counts as "running".
+- **Recovery is now matched to the failure mode.** A `pasted` prompt is nudged
+  with up to three bare Enters (a no-op on an empty composer); only an
+  `absent` prompt is resent. The old path resent the whole prompt into a
+  composer that already held it, silently duplicating the text.
+- Paste settling time now scales with prompt length (0.6–3.0s instead of a
+  flat 0.5s), so large prompts stop racing the renderer.
+
+### Added
+
+- `tests/test_prompt_delivery.py` — four regression tests covering the failure
+  mode: pasted-not-submitted recovers via Enter and never resends; a running
+  turn is left alone; an absent prompt is resent; a stuck composer gives up
+  within the retry budget.
+- New event: `job.prompt_enter_retry` (emitted when the Enter nudge fires).
+
+
 ## v0.6.1 — 2026-08-19
 
 ### Changed
