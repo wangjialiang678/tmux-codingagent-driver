@@ -140,6 +140,21 @@ def resolve(ref: str, md_file: Path, root: Path) -> Path | None:
     return None
 
 
+def git_tracked_markdown(root: Path, scan_dir: Path) -> list[Path]:
+    """scan_dir 下受 git 管理的 .md（已跟踪 + 未忽略的未跟踪）；git 不可用时退回 rglob。"""
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "-z", "-co", "--exclude-standard", "--", str(scan_dir.relative_to(root)) if scan_dir != root else "."],
+            cwd=root, capture_output=True, check=True,
+        ).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
+        return [
+            p for p in scan_dir.rglob("*.md")
+            if not any(part in {".git", "node_modules", "repos", ".venv", "dist", "build"} for part in p.parts)
+        ]
+    return [root / rel for rel in out.decode("utf-8", "replace").split("\0") if rel.endswith(".md")]
+
+
 def main() -> int:
     args = [a for a in sys.argv[1:]]
     as_json = "--json" in args
@@ -150,16 +165,14 @@ def main() -> int:
     ignores = load_ignores(root)
     scan_dirs = [root / a for a in args] if args else [root]
 
+    # 只看 git 管理（含未忽略的新文件）的文档：workspace/、.claude/ 等被 gitignore 的
+    # 运行态目录里的 .md 不是仓库承诺，扫进来只会在真实检出里制造假红。
     md_files: list[Path] = []
     for d in scan_dirs:
         if d.is_file() and d.suffix == ".md":
             md_files.append(d)
         elif d.is_dir():
-            md_files.extend(
-                p for p in d.rglob("*.md")
-                if not any(part in {".git", "node_modules", "repos", ".venv", "dist", "build"}
-                           for part in p.parts)
-            )
+            md_files.extend(git_tracked_markdown(root, d))
 
     missing: list[dict] = []
     ignored: list[dict] = []
