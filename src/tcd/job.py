@@ -19,6 +19,7 @@ from tcd.config import (
     job_log_path,
     job_prompt_path,
     job_signal_path,
+    tmux_socket,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,8 @@ class Job:
     prompt: str
     cwd: str
     tmux_session: str
+    # None means a pre-socket record and triggers tcd→default lookup fallback.
+    tmux_socket: str | None = None
     model: str | None = None
     created_at: str = field(default_factory=_now_iso)
     started_at: str | None = None
@@ -118,6 +121,7 @@ class JobManager:
             prompt=prompt,
             cwd=cwd,
             tmux_session=tmux_session,
+            tmux_socket=tmux_socket() or "",
             model=model,
             timeout_minutes=timeout_minutes,
             sandbox=sandbox,
@@ -177,14 +181,9 @@ class JobManager:
         from tcd.tmux_adapter import TmuxAdapter
         from tcd.worktree import stash_exists
 
-        try:
-            live_sessions = TmuxAdapter().list_sessions()
-        except Exception:
-            live_sessions = set()
-
         held: list[tuple[str, str]] = []
         for job in self.list_jobs():
-            if job.tmux_session in live_sessions:
+            if _job_session_exists(job):
                 held.append((job.id, f"tmux session {job.tmux_session} still alive"))
                 continue
             if job.worktree_path and Path(job.worktree_path).exists():
@@ -224,3 +223,15 @@ class JobManager:
     def _remove_job_files(job_id: str) -> None:
         for path_fn in (job_json_path, job_log_path, job_prompt_path, job_signal_path, job_events_path):
             path_fn(job_id).unlink(missing_ok=True)
+
+
+def _job_session_exists(job: Job) -> bool:
+    """Check a job's session, retaining support for lightweight fake adapters."""
+    from tcd.tmux_adapter import TmuxAdapter
+
+    if hasattr(TmuxAdapter, "for_job"):
+        return TmuxAdapter.for_job(job).session_exists(job.tmux_session)
+    tmux = TmuxAdapter()
+    if hasattr(tmux, "session_exists"):
+        return tmux.session_exists(job.tmux_session)
+    return job.tmux_session in tmux.list_sessions()

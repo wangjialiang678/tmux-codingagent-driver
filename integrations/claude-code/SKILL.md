@@ -188,8 +188,9 @@ tcd log <job_id> --event job.checked # 按类型过滤
 tcd output <job_id> --since-line 150  # 从第 150 行开始
 tcd output <job_id> --tail 20         # 最后 20 行
 
-# 附加到 tmux session（调试用）
-tcd attach <job_id>
+# 附加到 tmux session（调试用；默认使用 tcd 的独立 socket）
+tmux -L tcd attach -t tcd-codex-<job_id>
+tmux -L tcd ls
 
 # 清理已完成的任务
 tcd clean

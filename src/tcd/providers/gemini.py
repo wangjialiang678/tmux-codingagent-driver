@@ -24,6 +24,14 @@ REQ_RE = re.compile(r"TCD_REQ:(\S+)")
 DONE_RE = re.compile(r"TCD_DONE:(\S+)")
 
 
+def _tmux_for_job(job: Job) -> TmuxAdapter:
+    """Select the recorded server, with a tcd→default legacy fallback."""
+    primary = TmuxAdapter() if job.tmux_socket is None else TmuxAdapter(socket=job.tmux_socket or None)
+    if job.tmux_socket is not None or primary.session_exists(job.tmux_session):
+        return primary
+    return TmuxAdapter(socket=None)
+
+
 @register_provider
 class GeminiProvider(Provider):
     """Adapter for Gemini CLI (gemini)."""
@@ -80,7 +88,7 @@ class GeminiProvider(Provider):
                 return CompletionResult(state="idle")
 
         # Strategy 2: marker scan via capture-pane
-        tmux = TmuxAdapter()
+        tmux = _tmux_for_job(job)
         if tmux.session_exists(job.tmux_session):
             pane = tmux.capture_pane(job.tmux_session)
             if pane:
@@ -105,7 +113,7 @@ class GeminiProvider(Provider):
 
     def parse_response(self, job: Job) -> str | None:
         """Parse response from capture-pane (Gemini has no standard session file)."""
-        tmux = TmuxAdapter()
+        tmux = _tmux_for_job(job)
         if tmux.session_exists(job.tmux_session):
             pane = tmux.capture_pane(job.tmux_session)
             if pane:

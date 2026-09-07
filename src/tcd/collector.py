@@ -18,6 +18,7 @@ class ResponseCollector:
 
     def __init__(self, tmux: TmuxAdapter | None = None) -> None:
         self.tmux = tmux or TmuxAdapter()
+        self._tmux_supplied = tmux is not None
 
     def collect(self, job: Job, *, raw: bool = False) -> str | None:
         """Collect the response for a job.
@@ -67,10 +68,11 @@ class ResponseCollector:
 
     def _try_capture_pane(self, job: Job, *, full: bool = False) -> str | None:
         """Strategy 2: tmux capture-pane."""
-        if not self.tmux.session_exists(job.tmux_session):
+        tmux = self.tmux if self._tmux_supplied else TmuxAdapter.for_job(job)
+        if not tmux.session_exists(job.tmux_session):
             return None
         start_line = "-" if full else "-500"
-        result = self.tmux.capture_pane(job.tmux_session, start_line=start_line)
+        result = tmux.capture_pane(job.tmux_session, start_line=start_line)
         if result:
             logger.debug("Got response from capture-pane for job %s", job.id)
         return result

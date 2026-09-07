@@ -140,6 +140,20 @@ tcd -vv check <job_id>                  # DEBUG level
 | `tcd verify <job_id> [--json]` | Check the job against its acceptance contract — "is the task done", not "is the turn idle" |
 | `tcd doctor [--live] [--provider P] [--timeout N] [--json]` | Check that tcd's provider detection assumptions still hold |
 
+### Debugging tmux sessions
+
+New tcd jobs use their own `tcd` tmux socket. To inspect a Codex job directly:
+
+```bash
+tmux -L tcd attach -t tcd-codex-<id>
+tmux -L tcd ls
+```
+
+This prevents another tool's `tmux kill-server` from killing tcd executors — a
+WorkBuddy debugging `kill-server` killed a running Codex job on 2026-09-07.
+Set `TCD_TMUX_SOCKET` to choose another socket; set it to an empty string to
+use the historical default tmux server.
+
 ### Start Options
 
 | Option | Description |

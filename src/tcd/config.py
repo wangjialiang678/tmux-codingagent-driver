@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 TCD_HOME = Path.home() / ".tcd"
@@ -11,6 +12,19 @@ LOG_FILE = TCD_HOME / "tcd.log"
 
 DEFAULT_TIMEOUT_MINUTES = 60
 TMUX_SESSION_PREFIX = "tcd"
+DEFAULT_TMUX_SOCKET = "tcd"
+
+
+def tmux_socket() -> str | None:
+    """Return tcd's tmux socket, or ``None`` for the default tmux server.
+
+    TCD_TMUX_SOCKET deliberately distinguishes unset (the isolated ``tcd``
+    server) from set-to-empty (the historical default server).
+    """
+    value = os.environ.get("TCD_TMUX_SOCKET")
+    if value is None:
+        return DEFAULT_TMUX_SOCKET
+    return value or None
 
 
 def ensure_dirs() -> None:

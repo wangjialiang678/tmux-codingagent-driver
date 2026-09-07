@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **tcd now uses an isolated `tcd` tmux socket by default.** This prevents a
+  different tool's `tmux kill-server` from terminating tcd executors. New job
+  records persist their socket; pre-isolation records are found on `tcd` first
+  and then on the historical default server. `TCD_TMUX_SOCKET` overrides the
+  name, while an explicit empty value restores the default-server behaviour.
+
 ## v0.6.2 — 2026-09-07
 
 ### Fixed

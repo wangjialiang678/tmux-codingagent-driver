@@ -12,6 +12,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from tcd.config import tmux_socket
+
 logger = logging.getLogger(__name__)
 
 SUBPROCESS_TIMEOUT = 10  # seconds
@@ -57,8 +59,25 @@ def _run(args: list[str], *, check: bool = True, timeout: int = SUBPROCESS_TIMEO
 class TmuxAdapter:
     """Thin wrapper around tmux CLI commands."""
 
-    def __init__(self) -> None:
+    def __init__(self, socket: str | None | object = ...) -> None:
         self._tmux = shutil.which("tmux")
+        self.socket: str | None = tmux_socket() if socket is ... else socket  # type: ignore[assignment]
+
+    @classmethod
+    def for_job(cls, job: object) -> "TmuxAdapter":
+        """Return the server that owns *job*'s session.
+
+        Records from before socket metadata first probe the new isolated
+        server, then the historical default server.  New records are explicit,
+        including ``""`` which is the compatibility switch for default tmux.
+        """
+        socket = getattr(job, "tmux_socket", None)
+        if socket is not None:
+            return cls(socket=socket or None)
+        preferred = cls()
+        if preferred.session_exists(getattr(job, "tmux_session")):
+            return preferred
+        return cls(socket=None)
 
     def check_tmux(self) -> None:
         """Raise TmuxNotFoundError if tmux is not installed."""
@@ -74,6 +93,11 @@ class TmuxAdapter:
         assert self._tmux is not None
         return self._tmux
 
+    @property
+    def command_prefix(self) -> list[str]:
+        """tmux executable plus the selected server argument."""
+        return [self.tmux, *( ["-L", self.socket] if self.socket else [])]
+
     def create_session(self, name: str, cmd: str, cwd: str) -> bool:
         """Create a detached tmux session running *cmd* in *cwd*.
 
@@ -81,7 +105,7 @@ class TmuxAdapter:
         """
         try:
             _run([
-                self.tmux, "new-session",
+                *self.command_prefix, "new-session",
                 "-d",             # detached
                 "-s", name,       # session name
                 "-c", cwd,        # working directory
@@ -96,7 +120,7 @@ class TmuxAdapter:
     def session_exists(self, name: str) -> bool:
         """Check whether a tmux session with *name* exists."""
         try:
-            _run([self.tmux, "has-session", "-t", name])
+            _run([*self.command_prefix, "has-session", "-t", name])
             return True
         except subprocess.CalledProcessError:
             return False
@@ -108,7 +132,7 @@ class TmuxAdapter:
         subprocess per job; this pays for a single `list-sessions`.
         """
         try:
-            result = _run([self.tmux, "list-sessions", "-F", "#{session_name}"])
+            result = _run([*self.command_prefix, "list-sessions", "-F", "#{session_name}"])
         except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             # No server running means no sessions.
             return set()
@@ -124,9 +148,9 @@ class TmuxAdapter:
         """
         try:
             for chunk in _utf8_chunks(text, MAX_SENDKEYS_BYTES):
-                _run([self.tmux, "send-keys", "-t", session, "-l", chunk])
+                _run([*self.command_prefix, "send-keys", "-t", session, "-l", chunk])
             time.sleep(0.2)  # let TUI process input before Enter
-            _run([self.tmux, "send-keys", "-t", session, "Enter"])
+            _run([*self.command_prefix, "send-keys", "-t", session, "Enter"])
             logger.debug("Sent %d chars to session %s", len(text), session)
             return True
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
@@ -136,7 +160,7 @@ class TmuxAdapter:
     def send_enter(self, session: str) -> bool:
         """Send just the Enter key to a tmux session."""
         try:
-            _run([self.tmux, "send-keys", "-t", session, "Enter"])
+            _run([*self.command_prefix, "send-keys", "-t", session, "Enter"])
             return True
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             logger.error("send_enter failed for %s: %s", session, exc)
@@ -156,15 +180,15 @@ class TmuxAdapter:
                 f.write(text)
                 tmp_path = f.name
 
-            _run([self.tmux, "load-buffer", tmp_path])
-            _run([self.tmux, "paste-buffer", "-p", "-t", session])
+            _run([*self.command_prefix, "load-buffer", tmp_path])
+            _run([*self.command_prefix, "paste-buffer", "-p", "-t", session])
             # Let the TUI digest the paste before Enter. A big prompt takes an
             # Ink renderer noticeably longer; sending Enter too early gets it
             # eaten and the turn never starts (2026-09-07 Codex 0.153.4).
             # readiness.verify_prompt_delivery() recovers with bare Enters, but
             # waiting proportionally avoids needing that in the common case.
             time.sleep(min(3.0, max(0.6, len(text) / 4000)))
-            _run([self.tmux, "send-keys", "-t", session, "Enter"])
+            _run([*self.command_prefix, "send-keys", "-t", session, "Enter"])
 
             logger.debug("Sent %d chars (long) to session %s", len(text), session)
             return True
@@ -210,7 +234,7 @@ class TmuxAdapter:
 
         try:
             result = _run(
-                [self.tmux, "capture-pane", "-t", session, "-p", "-S", start_line],
+                [*self.command_prefix, "capture-pane", "-t", session, "-p", "-S", start_line],
                 timeout=SUBPROCESS_TIMEOUT,
             )
             return result.stdout
@@ -221,12 +245,20 @@ class TmuxAdapter:
     def kill_session(self, session: str) -> bool:
         """Kill a tmux session."""
         try:
-            _run([self.tmux, "kill-session", "-t", session])
+            _run([*self.command_prefix, "kill-session", "-t", session])
             logger.info("Killed tmux session: %s", session)
             return True
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             logger.error("kill_session failed for %s: %s", session, exc)
             return False
+
+    def attach_args(self, session: str) -> list[str]:
+        """Return the exec-ready command to attach to *session*."""
+        return [*self.command_prefix, "attach-session", "-t", session]
+
+    def version(self) -> str:
+        """Return tmux's version using this adapter's command prefix."""
+        return _run([*self.command_prefix, "-V"], timeout=SUBPROCESS_TIMEOUT).stdout.strip()
 
     @staticmethod
     def build_script_command(log_file: str, inner_cmd: str) -> str:

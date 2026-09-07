@@ -160,7 +160,13 @@ def _check_tmux(report: DoctorReport) -> tuple[TmuxAdapter, bool]:
         report.add("TMUX", "error", f"Unable to check tmux: {exc}")
         return tmux, False
 
-    version, version_error = _get_version(path)
+    if hasattr(tmux, "version"):
+        try:
+            version, version_error = tmux.version(), None
+        except Exception as exc:
+            version, version_error = None, str(exc)
+    else:
+        version, version_error = _get_version(path)
     if version_error:
         report.add(
             "TMUX",
@@ -171,6 +177,18 @@ def _check_tmux(report: DoctorReport) -> tuple[TmuxAdapter, bool]:
         )
     else:
         report.add("TMUX", "pass", f"tmux is available at {path} ({version}).", path=path, version=version)
+    try:
+        sessions = tmux.list_sessions()
+        socket = getattr(tmux, "socket", None)
+        report.add(
+            "TMUX_SOCKET",
+            "pass",
+            f"Using tmux socket {socket or 'default'} with {len(sessions)} session(s).",
+            socket=socket or "default",
+            session_count=len(sessions),
+        )
+    except Exception as exc:
+        report.add("TMUX_SOCKET", "warning", f"Could not list sessions on the configured tmux socket: {exc}")
     return tmux, True
 
 
@@ -329,7 +347,15 @@ def _check_jobs(report: DoctorReport, tmux: TmuxAdapter | None) -> None:
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
             logger.warning("doctor: ignoring unreadable job record %s: %s", path, exc)
             continue
-        if job.status == "running" and job.tmux_session not in sessions:
+        if job.status != "running":
+            continue
+        if job.tmux_socket is None:
+            # Pre-isolation records can be in either tcd's new server or the
+            # historical default server.
+            found = job.tmux_session in sessions or _default_session_exists(job.tmux_session)
+        else:
+            found = TmuxAdapter(socket=job.tmux_socket or None).session_exists(job.tmux_session)
+        if not found:
             ghost_ids.append(job.id)
 
     if ghost_ids:
@@ -342,6 +368,14 @@ def _check_jobs(report: DoctorReport, tmux: TmuxAdapter | None) -> None:
         )
     else:
         report.add("GHOST_JOBS", "pass", "No running job records are missing tmux sessions.", count=0, job_ids=[])
+
+
+def _default_session_exists(session: str) -> bool:
+    """Probe historical default tmux, tolerating simple test adapters."""
+    try:
+        return TmuxAdapter(socket=None).session_exists(session)
+    except TypeError:
+        return False
 
 
 def _run_live_check(report: DoctorReport, tmux: TmuxAdapter, prov: Any, timeout: int) -> None:

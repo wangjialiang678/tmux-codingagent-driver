@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import time
+import subprocess
 
 import pytest
 
 from tcd.tmux_adapter import TmuxAdapter, TmuxNotFoundError
+from tcd.job import Job
 
 
 # ---------------------------------------------------------------------------
@@ -31,6 +33,47 @@ def test_build_script_command_quotes_paths(monkeypatch):
     monkeypatch.setattr("tcd.tmux_adapter.platform.system", lambda: "Darwin")
     cmd = TmuxAdapter.build_script_command("/tmp/my log.txt", "codex -a never")
     assert "'/tmp/my log.txt'" in cmd
+
+
+def test_adapter_adds_configured_socket_to_all_commands(monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_run(args, **_kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr("tcd.tmux_adapter._run", fake_run)
+    adapter = TmuxAdapter(socket="isolated")
+    assert adapter.create_session("s", "bash", "/tmp")
+    assert adapter.session_exists("s")
+    assert adapter.kill_session("s")
+    assert all(call[1:3] == ["-L", "isolated"] for call in calls)
+
+
+def test_empty_socket_uses_default_tmux_server(monkeypatch):
+    monkeypatch.setenv("TCD_TMUX_SOCKET", "")
+    adapter = TmuxAdapter()
+    assert adapter.socket is None
+    assert adapter.command_prefix == [adapter.tmux]
+
+
+def test_legacy_job_falls_back_from_tcd_socket_to_default_server(monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_run(args, **_kwargs):
+        calls.append(args)
+        if args[1:3] == ["-L", "tcd"]:
+            raise subprocess.CalledProcessError(1, args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.delenv("TCD_TMUX_SOCKET", raising=False)
+    monkeypatch.setattr("tcd.tmux_adapter._run", fake_run)
+    job = Job("old", "codex", "running", "p", "/tmp", "old-session")
+    adapter = TmuxAdapter.for_job(job)
+    assert adapter.socket is None
+    assert adapter.session_exists(job.tmux_session)
+    assert calls[0][1:3] == ["-L", "tcd"]
+    assert calls[1][1:] == ["has-session", "-t", "old-session"]
 
 
 # ---------------------------------------------------------------------------

@@ -26,6 +26,14 @@ QUEUED_MESSAGE_RE = re.compile(r"press\s+up\s+to\s+edit\s+queued\s+messages?", r
 _NON_ASCII_ALNUM_RE = re.compile(r"[^A-Za-z0-9]")
 
 
+def _tmux_for_job(job: Job) -> TmuxAdapter:
+    """Select the recorded server, with a tcd→default legacy fallback."""
+    primary = TmuxAdapter() if job.tmux_socket is None else TmuxAdapter(socket=job.tmux_socket or None)
+    if job.tmux_socket is not None or primary.session_exists(job.tmux_session):
+        return primary
+    return TmuxAdapter(socket=None)
+
+
 def has_queued_message_notice(pane: str) -> bool:
     """Return True when Claude Code reports a submitted prompt is still queued."""
     return bool(QUEUED_MESSAGE_RE.search(pane))
@@ -102,7 +110,7 @@ class ClaudeProvider(Provider):
                 return CompletionResult(state="idle")
 
         # Strategy 2: marker scan via capture-pane
-        tmux = TmuxAdapter()
+        tmux = _tmux_for_job(job)
         if tmux.session_exists(job.tmux_session):
             pane = tmux.capture_pane(job.tmux_session)
             if pane:

@@ -16,7 +16,7 @@ import click
 from tcd import __version__
 from tcd.acceptance import current_head, evaluate as evaluate_acceptance, has_contract
 from tcd.collector import ResponseCollector
-from tcd.config import ensure_dirs, job_signal_path
+from tcd.config import ensure_dirs, job_signal_path, tmux_socket
 from tcd.diagnostics import Warning as DiagnosticWarning, diagnose
 from tcd.doctor import run_doctor
 from tcd.event_log import emit, load_events
@@ -39,6 +39,30 @@ _RUNNING_IDLE_NOTE = (
 
 def _get_tmux() -> TmuxAdapter:
     tmux = TmuxAdapter()
+    try:
+        getattr(tmux, "check_tmux", lambda: None)()
+    except TmuxNotFoundError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    return tmux
+
+
+def _get_job_tmux(job: Job) -> TmuxAdapter:
+    """Get the tmux server owning a job, including legacy fallback."""
+    if job.tmux_socket is None:
+        tmux = _get_tmux()
+        # Minimal fake adapters used by callers may only implement the method
+        # needed for their operation; in that case it represents the selected
+        # server already.
+        if not hasattr(tmux, "session_exists") or tmux.session_exists(job.tmux_session):
+            return tmux
+        return TmuxAdapter(socket=None)
+    if job.tmux_socket == (tmux_socket() or ""):
+        return _get_tmux()
+    try:
+        tmux = TmuxAdapter(socket=job.tmux_socket or None)
+    except TypeError:  # lightweight adapter fakes without socket support
+        return _get_tmux()
     try:
         tmux.check_tmux()
     except TmuxNotFoundError as e:
@@ -393,6 +417,7 @@ def status(job_id: str, as_json: bool):
 
     if as_json:
         d = job.to_dict()
+        d["tmux_socket"] = job.tmux_socket if job.tmux_socket is not None else _get_job_tmux(job).socket
         d["elapsed_seconds"] = _elapsed(job)
         note = _running_idle_note(job)
         if note:
@@ -401,6 +426,7 @@ def status(job_id: str, as_json: bool):
     else:
         click.echo(f"ID:       {job.id}")
         click.echo(f"Provider: {job.provider}")
+        click.echo(f"Socket:   {job.tmux_socket if job.tmux_socket is not None else _get_job_tmux(job).socket or 'default'}")
         click.echo(f"Status:   {job.status}")
         click.echo(f"Turn:     {job.turn_count}")
         if job.turn_state:
@@ -567,7 +593,7 @@ def check(job_id: str, as_json: bool):
             # "AI actively generating output" from "AI truly stuck".
             _pane_hash = None
             try:
-                _tmux_for_hash = TmuxAdapter()
+                _tmux_for_hash = _get_job_tmux(job)
                 _pane_for_hash = _tmux_for_hash.capture_pane(job.tmux_session)
                 if _pane_for_hash:
                     import hashlib
@@ -581,7 +607,7 @@ def check(job_id: str, as_json: bool):
         activity_lines: list[str] = []
         scrollback = None
         try:
-            tmux = TmuxAdapter()
+            tmux = _get_job_tmux(job)
             pane = tmux.capture_pane(job.tmux_session)
             if pane:
                 pane_tail = "\n".join(pane.splitlines()[-5:])
@@ -752,7 +778,6 @@ def wait(job_id: str, timeout: int):
 @click.option("--file", "file_path", default=None, help="Read message from file.")
 def send(job_id: str, message: str | None, file_path: str | None):
     """Send a follow-up message to a running job."""
-    tmux = _get_tmux()
     mgr = JobManager()
     job = mgr.load_job(job_id)
     if job is None:
@@ -762,6 +787,7 @@ def send(job_id: str, message: str | None, file_path: str | None):
     if job.status != "running":
         click.echo(f"Error: job {job_id} is not running (status={job.status}).", err=True)
         sys.exit(1)
+    tmux = _get_job_tmux(job)
 
     # Resolve message
     if file_path and message:
@@ -859,12 +885,13 @@ def attach(job_id: str):
         click.echo(f"Error: job {job_id!r} not found.", err=True)
         sys.exit(1)
 
-    tmux = _get_tmux()
+    tmux = _get_job_tmux(job)
     if not tmux.session_exists(job.tmux_session):
         click.echo(f"Error: tmux session {job.tmux_session} no longer exists.", err=True)
         sys.exit(1)
 
-    os.execvp("tmux", ["tmux", "attach-session", "-t", job.tmux_session])
+    args = tmux.attach_args(job.tmux_session)
+    os.execvp(args[0], args)
 
 
 # ---------------------------------------------------------------------------
@@ -1007,7 +1034,7 @@ def merge(job_id: str, squash: bool, no_cleanup: bool):
     # The session outlives the merge unless killed, and `clean` will then delete
     # the record that names it.
     try:
-        tmux = TmuxAdapter()
+        tmux = _get_job_tmux(job)
         if tmux.session_exists(job.tmux_session):
             tmux.kill_session(job.tmux_session)
             emit(job.id, "job.killed", reason="merged")
@@ -1096,17 +1123,21 @@ def clean(clean_all: bool, force: bool):
 
 def _reconcile_jobs(mgr: JobManager) -> int:
     """Close out jobs whose tmux session is gone. Returns how many changed."""
-    try:
-        live = TmuxAdapter().list_sessions()
-    except Exception:
-        logger.warning("reconcile: could not list tmux sessions", exc_info=True)
-        return 0
-
     changed = 0
     for job in mgr.list_jobs():
         if job.status not in ("running", "pending"):
             continue
-        if job.tmux_session in live:
+        try:
+            tmux = _get_job_tmux(job)
+            session_exists = (
+                tmux.session_exists(job.tmux_session)
+                if hasattr(tmux, "session_exists")
+                else job.tmux_session in tmux.list_sessions()
+            )
+        except Exception:
+            logger.warning("reconcile: could not check session for %s", job.id, exc_info=True)
+            continue
+        if session_exists:
             continue
         if job.turn_state == "working":
             job.status = "failed"
@@ -1126,7 +1157,7 @@ def _refresh_status(job: Job, mgr: JobManager) -> None:
     if job.status != "running":
         return
 
-    tmux = TmuxAdapter()
+    tmux = _get_job_tmux(job)
     if not tmux.session_exists(job.tmux_session):
         # Session disappeared during an active turn is treated as failure.
         if job.turn_state == "working":
@@ -1202,6 +1233,7 @@ def _worktree_has_unsaved_work(job: Job, repo_root) -> str | None:
 
 def _kill_job(job: Job, tmux: TmuxAdapter, mgr: JobManager, *, force: bool = False) -> None:
     logger.info("kill %s: killing job (provider=%s, elapsed=%ds)", job.id, job.provider, _elapsed(job))
+    tmux = _get_job_tmux(job)
     if tmux.session_exists(job.tmux_session):
         tmux.kill_session(job.tmux_session)
     job.status = "failed"
