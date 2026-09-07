@@ -106,6 +106,12 @@ def wait_for_tui(
     return tui_ready, elapsed_ms, trust_handled
 
 
+# How many bare Enters to try when the prompt is visibly pasted but no turn
+# is running. Cheap and side-effect free: an extra Enter on an empty composer
+# is a no-op, whereas a resent prompt duplicates text.
+ENTER_RETRIES = 3
+
+
 def verify_prompt_delivery(
     tmux,
     session: str,
@@ -116,12 +122,22 @@ def verify_prompt_delivery(
     markers: tuple[str, ...] = WORKING_MARKERS,
     timeout_secs: float | None = None,
 ) -> bool:
-    """Confirm the agent received the prompt; resend if it was dropped.
+    """Confirm the agent actually started the turn; recover if it did not.
 
-    Looks for evidence in the pane that the prompt landed: a snippet of the
-    prompt echoed back, or a 'turn running' marker. If neither shows up within
-    a few seconds the keystrokes were likely swallowed during TUI init — resend
-    (up to ``retries`` times). Returns whether delivery was confirmed.
+    Delivery has two distinct failure modes and they need different cures:
+
+    * **absent** — nothing landed; the keystrokes were swallowed during TUI
+      init. Cure: resend the whole prompt.
+    * **pasted-but-not-submitted** — the prompt sits in the composer (its text
+      is visible in the pane) but no turn is running, because the trailing
+      Enter was eaten while the TUI was still digesting a bracketed paste.
+      Cure: send a bare Enter. Resending the whole prompt here would duplicate
+      the text inside the composer, which is how this used to fail silently
+      (2026-09-07: Codex 0.153.4, prompt visible, turn_count stuck at 0 for
+      46 min, tcd reporting delivery as confirmed).
+
+    Only a provider *working marker* proves a turn is running; echoed prompt
+    text proves nothing but that the paste landed.
 
     *markers* must match the provider's own TUI (``prov.working_markers``).
     Markers that never match turn this guard into a duplicate-submission bug:
@@ -135,33 +151,53 @@ def verify_prompt_delivery(
             snippet = line[:16]
             break
 
-    def landed() -> bool:
+    def observe(rounds: int = 8) -> str:
+        """Return "running" | "pasted" | "absent" after watching the pane."""
         deadline = time.time() + timeout_secs if timeout_secs is not None else None
-        for _ in range(8):  # ~4s of observation
+        seen_text = False
+        for _ in range(rounds):  # ~4s of observation at 0.5s cadence
             if deadline is not None and time.time() >= deadline:
-                return False
+                break
             sleep_for = 0.5 if deadline is None else min(0.5, max(0.0, deadline - time.time()))
             if sleep_for <= 0:
-                return False
+                break
             time.sleep(sleep_for)
             pane = tmux.capture_pane(session, start_line="0")
             if pane is None:
                 continue
-            pane_low = pane.lower()
+            if any(m in pane.lower() for m in markers):
+                return "running"
             if snippet and snippet in pane:
-                return True
-            if any(m in pane_low for m in markers):
-                return True
-        return False
+                seen_text = True
+        return "pasted" if seen_text else "absent"
 
-    for attempt in range(retries + 1):
-        if landed():
-            if attempt:
-                emit(job_id, "job.prompt_confirmed", attempt=attempt)
+    # Phase 1: the trailing Enter may have been eaten by a still-digesting
+    # bracketed paste. Nudge with bare Enters before touching the prompt.
+    for enter_attempt in range(ENTER_RETRIES + 1):
+        state = observe()
+        if state == "running":
+            if enter_attempt:
+                emit(job_id, "job.prompt_confirmed", attempt=enter_attempt, via="enter")
             return True
+        if state != "pasted" or enter_attempt >= ENTER_RETRIES:
+            break
+        emit(job_id, "job.prompt_enter_retry", attempt=enter_attempt + 1)
+        tmux.send_enter(session)
+
+    # Phase 2: nothing landed (or Enters did not help) — resend the prompt.
+    for attempt in range(retries + 1):
+        if attempt:
+            state = observe()
+            if state == "running":
+                emit(job_id, "job.prompt_confirmed", attempt=attempt)
+                return True
         if attempt < retries:
             emit(job_id, "job.prompt_resend", attempt=attempt + 1)
             tmux.send_text(session, sent_text)
+
+    if observe(rounds=4) == "running":
+        emit(job_id, "job.prompt_confirmed", attempt=retries)
+        return True
 
     emit(job_id, "job.prompt_unconfirmed")
     return False

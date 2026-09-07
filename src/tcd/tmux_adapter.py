@@ -158,7 +158,12 @@ class TmuxAdapter:
 
             _run([self.tmux, "load-buffer", tmp_path])
             _run([self.tmux, "paste-buffer", "-p", "-t", session])
-            time.sleep(0.5)  # let TUI process pasted content
+            # Let the TUI digest the paste before Enter. A big prompt takes an
+            # Ink renderer noticeably longer; sending Enter too early gets it
+            # eaten and the turn never starts (2026-09-07 Codex 0.153.4).
+            # readiness.verify_prompt_delivery() recovers with bare Enters, but
+            # waiting proportionally avoids needing that in the common case.
+            time.sleep(min(3.0, max(0.6, len(text) / 4000)))
             _run([self.tmux, "send-keys", "-t", session, "Enter"])
 
             logger.debug("Sent %d chars (long) to session %s", len(text), session)
