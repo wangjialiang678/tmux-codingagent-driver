@@ -1,0 +1,4 @@
+# Planned batch implementation module; the feature-request document tracks it before implementation.
+src/tcd/batch.py
+# Planned batch test; the feature-request document tracks it before implementation.
+tests/test_batch.py

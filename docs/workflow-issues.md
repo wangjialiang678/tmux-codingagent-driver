@@ -331,7 +331,7 @@ M-6 (sandbox parameter not passed)
 ## References
 
 - Related job records: `~/.tcd/jobs/ece8b9e3.json` (review), `8e6c6b37.json` (third fix attempt)
-- Workflow log: `docs/workflow-log.md`
+- Workflow log: not retained in this repository.
 - Codex provider source: `src/tcd/providers/codex.py`
 - Codex Worker Skill: `~/.claude/skills/codex-worker/SKILL.md`
 
@@ -751,9 +751,9 @@ tcd's worktree feature assumes the AI will self-commit changes, but Codex in ful
 
 **Fix** (implemented)
 
-1. **Skill layer** (`codex-worker/skill.md`): in worktree scenarios, prompt must append commit instructions
+1. **Skill layer** (`integrations/claude-code/SKILL.md`): in worktree scenarios, prompt must append commit instructions
 2. **tcd layer** (`worktree.py`): added `branch_has_new_commits()` function, pre-checks before merge
-3. **tcd layer** (`cli.py` + `sdk.py`): calls pre-check before merge; outputs clear diagnostics and exits when no new commits
+3. **tcd layer** (`cli.py` plus the then-existing SDK): calls pre-check before merge; outputs clear diagnostics and exits when no new commits
 
 ### P1-4: Bootstrapping — Fixing tcd with Old tcd
 
@@ -813,9 +813,9 @@ This fix round clarified the responsibility boundary between tcd and Skill:
 ## References
 
 - Fix commits: see `git log --oneline -5` on main
-- Affected files: `src/tcd/worktree.py`, `src/tcd/cli.py`, `src/tcd/sdk.py`, `src/tcd/diagnostics.py`
+- Affected files: `src/tcd/worktree.py`, `src/tcd/cli.py`, the then-existing SDK, `src/tcd/diagnostics.py`
 - New tests: `test_r2_stall_suppressed_when_pane_hash_changes`, `test_r2_stall_triggers_with_same_pane_hash`, `test_merge_command_no_new_commits`
-- Skill update: `~/.claude/skills/codex-worker/skill.md`
+- Skill update: `integrations/claude-code/SKILL.md`
 
 ---
 
@@ -1031,7 +1031,7 @@ exist to prevent.
 ## References
 
 - Fix commit: `afdea4d`
-- Affected files: `src/tcd/worktree.py`, `src/tcd/cli.py`, `src/tcd/sdk.py`,
+- Affected files: `src/tcd/worktree.py`, `src/tcd/cli.py`, the then-existing SDK,
   `src/tcd/job.py`, `src/tcd/provider.py`, `src/tcd/providers/claude.py`,
   `src/tcd/providers/codex.py`, `src/tcd/tmux_adapter.py`
 - Tests: 290 passing (was 253)

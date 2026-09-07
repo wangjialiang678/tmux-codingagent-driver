@@ -261,13 +261,26 @@ starting over.
 
 ```bash
 # Install dev dependencies
-pip install -e ".[dev]"
+uv sync
 
 # Run tests
-python -m pytest tests/ -q
+uv run pytest -q
 
 # Run a specific test file
+uv run pytest tests/test_doc_refs.py -q
 ```
+
+### Document reference integrity
+
+```bash
+python3 tools/check_doc_refs.py
+```
+
+This checks that repository-relative files, scripts, and directories mentioned
+in Markdown actually exist, preventing documentation that only works on one
+machine. For a deliberate non-repository reference, add one glob per line to
+`.docrefsignore`, with a `#` reason immediately above it; only runtime data,
+other-repository pointers, or planned files belong there.
 
 ## License
 

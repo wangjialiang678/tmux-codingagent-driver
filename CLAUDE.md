@@ -114,8 +114,8 @@ All job state lives in `~/.tcd/jobs/` as flat files: `<id>.json` (metadata), `<i
 
 ## Closed-Loop Testing Rules
 
-- Test plan with locked criteria: `docs/test-plan.md`
-- Dev log: `docs/dev-log.md`
+- Keep acceptance criteria locked in the task's test plan when one is provided.
+- Keep a dev log when the task calls for one.
 - After each logical unit, run P0+P1 verification per the test plan
 - Every 3 feature paths, run full regression (all P0 + passed P1)
 - On failure: fix business code only, never relax criteria

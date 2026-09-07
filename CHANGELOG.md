@@ -260,7 +260,7 @@ Follow-up submission hardening, plus a real version number.
 - Claude Code can accept pasted text but leave it in its queued input state
   after the first Enter, showing `Press up to edit queued messages` — the
   follow-up looked delivered but the agent never saw it. New
-  `tcd/submission_recovery.py` inspects the pane right after a send, and when
+  `src/tcd/submission_recovery.py` inspects the pane right after a send, and when
   the provider reports the queued-message hint (providers opt in via
   `has_queued_message_notice(pane)`), sends one extra Enter and records
   `job.message_submit_retry` in the event log.
@@ -316,8 +316,8 @@ end-to-end path (`start` → develop → commit → `merge`) now works headlessl
 
 ### Prompt injection is now verified and resilient
 
-- New shared module `tcd/readiness.py` holds the TUI-readiness and
-  prompt-delivery logic that `cli.py` (`tcd start`) and `sdk.py` previously
+- New shared module `src/tcd/readiness.py` holds the TUI-readiness and
+  prompt-delivery logic that `cli.py` (`tcd start`) and the then-existing SDK previously
   duplicated — they had drifted, so SDK-side fixes never reached the CLI path.
 - `wait_for_tui` adds optional **pane-stability gating** (`tui_stable_secs`,
   2.5s for Codex): it waits for the pane to stop changing before declaring the
@@ -411,7 +411,8 @@ Git worktree parallel isolation, incremental output, activity extraction, and lo
 
 ## v0.2.0 — 2026-03-05
 
-Event log and diagnostics system, significantly improving tcd observability. See `docs/prd-event-log.md` for details.
+Event log and diagnostics system, significantly improving tcd observability. The
+original event-log PRD is not retained in this repository.
 
 ### Phase 1: Event Log
 
