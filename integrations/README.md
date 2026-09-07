@@ -2,13 +2,29 @@
 
 tcd 本身是命令行工具，`--help` 就能看懂。但**驱动方 AI 需要知道的不止参数**：什么时候派工、怎么写提示词、怎么判断"真的干完了"、上线前还要验什么——那些实战经验在这个目录里。
 
-## claude-code/SKILL.md
+## claude-code/ —— 技能本体（Claude Code 与 WorkBuddy 共用）
 
-Claude Code 技能（`codex-worker`）。安装：
+`codex-worker` 技能：`SKILL.md`（派工纪律与实战教训）+ `scripts/`（三个驱动 helper：
+`tcd-await-commit.sh` 可靠完成信号、`tcd-merge-safe.sh` 绝不丢工的合并、
+`tcd-watch-progress.sh` 进展轮询）。
+
+> 目录名沿用 `claude-code/` 是历史原因；内容对两个客户端通用，未改名以免打断既有软链接。
+
+安装（默认装到检测到的全部客户端）：
 
 ```bash
-bash integrations/install.sh
+bash integrations/install.sh            # Claude Code + WorkBuddy
+bash integrations/install.sh claude     # 只装 Claude Code
+bash integrations/install.sh workbuddy  # 只装 WorkBuddy
 ```
+
+装的是**软链接**，仓库即唯一版本源——`git pull` 后所有客户端同时生效。
+
+### 为什么强调软链接（2026-09-07 教训）
+
+WorkBuddy 侧此前是 7 月手工复制的副本，落后仓库两个月（216 行 vs 301 行）且无人察觉；
+同期发现三个 helper 脚本**只存在于两台安装副本里、从未入库**，而 SKILL.md 正文一直在引用它们。
+安装器现在会在覆盖前比对并备份不一致的本机副本，避免吞掉未回流的改动。
 
 装的是**软链接**（`~/.claude/skills/codex-worker/SKILL.md` → 本仓库文件），所以：
 
