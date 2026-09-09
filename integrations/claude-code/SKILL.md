@@ -43,7 +43,7 @@ tcd start -p codex -m "<任务提示词>" -d "<项目绝对路径>" --timeout 10
 
 ### Step 2: 带进展汇报的轮询等待
 
-> **2026-09-09 起默认用监工脚本，不再手写轮询**：`python3 "/Users/michael/projects/AI 工作流/agent-owners/tools/tcd_watch.py" <job_id> <标签> --marker "[DONE:<包名>]" --max-minutes N`（后台跑）。它把"作业掉在地上"的情形变成可见状态并自动处置：未提交（Turn 0 输入框有滞留文字）→ 补回车；停滞（画面去计时器后 25 分钟不变）→ 报警；回合结束无完成标记 → 判断是提问还是半途，发催办（最多 2 次）；**合法停下**（汇报里出现"白名单之外 / 等待驱动方"）→ 不催办，退出码 7 交驱动方裁定；有完成标记 → 自动 `tcd verify` 并透传返回码。返回码：0 verify 通过 / 1 verify 失败 / 2 超时 / 3 未启动 / 4 停滞 / 5 催办后仍未完成 / 6 会话消失 / 7 白名单停下。观察日志写到 agent-owners 仓 `data/observations/tcd/<job>.jsonl`，详见本文末尾「监工与派单模板附则」。
+> **2026-09-09 起默认用监工脚本，不再手写轮询**：`python3 "/Users/michael/projects/AI 工作流/agent-owners/tools/tcd_watch.py" <job_id> <标签> --marker "[DONE:<包名>]" --max-minutes N`（后台跑）。它把"作业掉在地上"的情形变成可见状态并自动处置：未提交（Turn 0 输入框有滞留文字）→ 补回车；停滞（画面去计时器后 25 分钟不变）→ 报警；回合结束无完成标记 → 判断是提问还是半途，发催办（最多 2 次）；**合法停下**（汇报里出现"白名单之外 / 等待驱动方"）→ 不催办，退出码 7 交驱动方裁定；有完成标记 → 自动 `tcd verify` 并透传返回码。返回码：0 verify 通过 / 1 verify 失败 / 2 超时 / 3 未启动 / 4 停滞 / 5 催办后仍未完成 / 6 会话消失 / 7 白名单停下。观察日志写到 agent-owners 仓 `data/observations/tcd/<job>.jsonl`，详见本文末尾「监工与派单模板附则」。**tcd ≥0.6.4 起监工不再直接碰 tmux**：状态取 `tcd status --json`（delivery / turn_count / last_event / last_agent_message_path），补回车用 `tcd nudge`（每次都是事件流里的 `job.nudge`），完成标记从 `<job>.last-message.md` 整行精确匹配；老版 tcd 自动降级。
 
 
 **禁止使用 `tcd wait`！** 它会阻塞整个 Claude Code 进程，用户在等待期间看不到任何输出。
