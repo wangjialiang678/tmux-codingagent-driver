@@ -72,3 +72,18 @@ def test_handle_truncates_long_message(tmp_path, monkeypatch):
     updated = json.loads((tmp_path / f"{job_id}.json").read_text())
     assert updated["last_agent_message"] == long_msg[:500]
     assert updated["last_agent_message_path"] == str(full_path)
+
+
+def test_title_generation_turn_is_ignored(tmp_path, monkeypatch):
+    """Codex's async title turn ({"title": ...}) must not bump turn_count or overwrite the last message."""
+    import json as _json
+    from tcd import notify_hook as nh
+    monkeypatch.setattr(nh, "_jobs_dir", lambda: tmp_path)
+    job_id = "abc12345"
+    (tmp_path / f"{job_id}.json").write_text(_json.dumps({"id": job_id, "turn_count": 1, "turn_state": "idle"}))
+    (tmp_path / f"{job_id}.last-message.md").write_text("[DONE:X]\nreal reply\n[DONE:X]\n")
+    nh.handle_notify(job_id, _json.dumps({"type": "agent-turn-complete", "turn-id": "t2", "last-assistant-message": '{"title":"验证监工脚本"}'}))
+    data = _json.loads((tmp_path / f"{job_id}.json").read_text())
+    assert data["turn_count"] == 1
+    assert (tmp_path / f"{job_id}.last-message.md").read_text().startswith("[DONE:X]")
+    assert not (tmp_path / f"{job_id}.turn-complete").exists()

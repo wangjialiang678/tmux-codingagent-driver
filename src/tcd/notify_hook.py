@@ -56,6 +56,18 @@ def _atomic_write_text(path: Path, text: str) -> None:
         raise
 
 
+def _is_title_generation(message: str) -> bool:
+    """True for Codex's title-generation turn: a bare JSON object whose only key is ``title``."""
+    text = (message or "").strip()
+    if not text.startswith("{") or len(text) > 400:
+        return False
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return isinstance(data, dict) and set(data.keys()) == {"title"}
+
+
 def handle_notify(job_id: str, raw_payload: str) -> None:
     """Process a Codex notify-hook callback."""
     try:
@@ -74,6 +86,18 @@ def handle_notify(job_id: str, raw_payload: str) -> None:
     # Extract data from payload
     turn_id = payload.get("turn-id", "")
     full_last_msg = payload.get("last-assistant-message", "")
+    if _is_title_generation(full_last_msg):
+        # Codex generates a session title in a separate, asynchronous agent turn whose
+        # only output is {"title": "..."}. It can complete *after* the real reply and
+        # would otherwise overwrite the last message and bump turn_count (2026-09-09:
+        # watcher saw turn 2 = title JSON, real reply lost). Record it, count nothing.
+        try:
+            from tcd.event_log import emit
+            emit(job_id, "job.title_generated", turn_id=turn_id)
+        except Exception:
+            logger.debug("title event not recorded for job %s", job_id)
+        logger.info("Notify hook: job %s title-generation turn ignored", job_id)
+        return
     last_msg = full_last_msg[:500] if full_last_msg else ""
 
     # Keep the historical 500-character fields below for compatibility, and

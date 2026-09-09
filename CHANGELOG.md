@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- **Codex title-generation turns no longer count as agent turns.** The async
+  `{"title": ...}` callback could arrive after the real reply and overwrite
+  `<job_id>.last-message.md` while bumping `turn_count`; it is now recorded as
+  `job.title_generated` and otherwise ignored (0.6.4).
+
 - **Start delivery checks no longer accept Codex's persistent `tokens used`
   status bar as proof of a running turn.** Only transient provider activity
   markers count, composer text takes precedence over stale activity, the

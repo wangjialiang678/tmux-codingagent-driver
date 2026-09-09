@@ -1,6 +1,6 @@
 [project]
 name = "tcd"
-version = "0.6.3"
+version = "0.6.4"
 description = "tmux-codingagent-driver: Drive AI CLI tools (Codex, Claude Code, Gemini CLI) via tmux"
 requires-python = ">=3.10"
 dependencies = [
