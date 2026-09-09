@@ -83,3 +83,7 @@ def job_signal_path(job_id: str) -> Path:
 
 def job_events_path(job_id: str) -> Path:
     return JOBS_DIR / f"{job_id}.events.jsonl"
+
+
+def job_last_message_path(job_id: str) -> Path:
+    return JOBS_DIR / f"{job_id}.last-message.md"

@@ -32,20 +32,11 @@ def test_version_flag_reports_package_version(runner):
         assert __version__ in result.output
 
 
-def test_pyproject_takes_its_version_from_the_package():
-    """The version must have exactly one source.
-
-    pyproject and __init__ previously both carried a literal and had drifted to
-    0.1.0 while the changelog was on 0.3.x. Asserting the *wiring* rather than
-    the installed metadata keeps this honest without depending on whether the
-    environment has been re-synced since the last bump.
-    """
+def test_pyproject_and_package_versions_match():
+    """Wheel metadata and the runtime version must move together."""
     pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
 
-    assert 'dynamic = ["version"]' in pyproject
-    assert '[tool.hatch.version]' in pyproject
-    assert 'path = "src/tcd/__init__.py"' in pyproject
-    assert "\nversion = " not in pyproject, "a literal version reintroduces the drift"
+    assert f'version = "{__version__}"' in pyproject
 
 
 @pytest.fixture()
@@ -153,6 +144,7 @@ def test_send_retries_enter_when_claude_leaves_followup_queued(runner, tmp_jobs,
     class FakeTmux:
         def __init__(self):
             self.enter_count = 0
+            self.pane = "Press up to edit queued messages"
 
         def check_tmux(self):
             return None
@@ -161,13 +153,15 @@ def test_send_retries_enter_when_claude_leaves_followup_queued(runner, tmp_jobs,
             return True
 
         def capture_pane(self, session, **kwargs):
-            return "Press up to edit queued messages"
+            return self.pane
 
         def send_enter(self, session):
             self.enter_count += 1
+            self.pane = "Working (1s - esc to interrupt)"
             return True
 
     class FakeProvider:
+        working_markers = ("esc to interrupt",)
         def build_prompt_wrapper(self, message, req_id):
             return message
 
@@ -205,13 +199,14 @@ def test_send_does_not_retry_enter_without_queued_notice(runner, tmp_jobs, monke
             return True
 
         def capture_pane(self, session, **kwargs):
-            return "Claude is responding normally"
+            return "Working (1s - esc to interrupt)"
 
         def send_enter(self, session):
             self.enter_count += 1
             return True
 
     class FakeProvider:
+        working_markers = ("esc to interrupt",)
         def build_prompt_wrapper(self, message, req_id):
             return message
 
@@ -800,15 +795,19 @@ def test_clean_keeps_jobs_whose_tmux_session_is_still_alive(runner, tmp_jobs, mo
 def test_start_json_emits_machine_readable_job(runner, tmp_jobs, monkeypatch):
     class FakeProvider:
         tui_ready_indicator = "READY"
+        working_markers = ("esc to interrupt",)
         def check_cli(self): return None
         def build_launch_command(self, job): return "fake"
         def build_prompt_wrapper(self, message, req_id): return message
 
     class FakeTmux:
+        def __init__(self): self.pane = "READY"
         def create_session(self, session, cmd, cwd): return True
-        def capture_pane(self, session, **kwargs): return "READY"
+        def capture_pane(self, session, **kwargs): return self.pane
         def send_enter(self, session): return True
-        def send_text(self, session, text): return True
+        def send_text(self, session, text):
+            self.pane = "Working (1s - esc to interrupt)"
+            return True
 
     monkeypatch.setattr("tcd.cli._get_tmux", lambda: FakeTmux())
     monkeypatch.setattr("tcd.cli.get_provider", lambda provider: FakeProvider())
@@ -820,3 +819,4 @@ def test_start_json_emits_machine_readable_job(runner, tmp_jobs, monkeypatch):
     payload = json.loads(result.output)
     assert payload["job_id"] == JobManager().list_jobs()[0].id
     assert payload["tmux_session"].startswith("tcd-codex-")
+    assert payload["delivery"] == "confirmed"

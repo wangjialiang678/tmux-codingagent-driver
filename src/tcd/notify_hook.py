@@ -36,6 +36,26 @@ def _job_json_path(job_id: str) -> Path:
     return _jobs_dir() / f"{job_id}.json"
 
 
+def _last_message_path(job_id: str) -> Path:
+    return _jobs_dir() / f"{job_id}.last-message.md"
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Replace *path* atomically so readers never see a partial message."""
+    import os
+    import tempfile
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except Exception:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 def handle_notify(job_id: str, raw_payload: str) -> None:
     """Process a Codex notify-hook callback."""
     try:
@@ -53,9 +73,13 @@ def handle_notify(job_id: str, raw_payload: str) -> None:
 
     # Extract data from payload
     turn_id = payload.get("turn-id", "")
-    last_msg = payload.get("last-assistant-message", "")
-    if last_msg and len(last_msg) > 500:
-        last_msg = last_msg[:500]
+    full_last_msg = payload.get("last-assistant-message", "")
+    last_msg = full_last_msg[:500] if full_last_msg else ""
+
+    # Keep the historical 500-character fields below for compatibility, and
+    # place the authoritative full response beside the job record.
+    full_message_path = _last_message_path(job_id)
+    _atomic_write_text(full_message_path, full_last_msg)
 
     # Write signal file
     signal_data = {
@@ -68,12 +92,18 @@ def handle_notify(job_id: str, raw_payload: str) -> None:
     signal_path.write_text(json.dumps(signal_data, ensure_ascii=False))
 
     # Update job.json
-    _update_job(job_id, turn_id, last_msg, timestamp)
+    _update_job(job_id, turn_id, last_msg, timestamp, full_message_path)
 
     logger.info("Notify hook: job %s turn complete (turn_id=%s)", job_id, turn_id)
 
 
-def _update_job(job_id: str, turn_id: str, last_msg: str, timestamp: str) -> None:
+def _update_job(
+    job_id: str,
+    turn_id: str,
+    last_msg: str,
+    timestamp: str,
+    full_message_path: Path,
+) -> None:
     """Update the job JSON with turn completion info."""
     job_path = _job_json_path(job_id)
     if not job_path.exists():
@@ -85,6 +115,7 @@ def _update_job(job_id: str, turn_id: str, last_msg: str, timestamp: str) -> Non
         data["turn_count"] = data.get("turn_count", 0) + 1
         data["turn_state"] = "idle"
         data["last_agent_message"] = last_msg or None
+        data["last_agent_message_path"] = str(full_message_path)
         # Atomic write
         import os
         import tempfile

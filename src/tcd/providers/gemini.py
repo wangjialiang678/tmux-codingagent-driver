@@ -44,7 +44,7 @@ class GeminiProvider(Provider):
     # latter). Delivery verification that only knew the Codex spelling would
     # read a running turn as a dropped prompt and re-send it, running the task
     # up to three times.
-    working_markers = ("esc to cancel", "tokens used")
+    working_markers = ("esc to cancel",)
 
     def check_cli(self) -> None:
         if shutil.which(self.cli_command) is None:

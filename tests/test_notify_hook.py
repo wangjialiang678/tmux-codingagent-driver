@@ -67,3 +67,8 @@ def test_handle_truncates_long_message(tmp_path, monkeypatch):
 
     signal = json.loads((tmp_path / f"{job_id}.turn-complete").read_text())
     assert len(signal["lastAgentMessage"]) == 500
+    full_path = tmp_path / f"{job_id}.last-message.md"
+    assert full_path.read_text() == long_msg
+    updated = json.loads((tmp_path / f"{job_id}.json").read_text())
+    assert updated["last_agent_message"] == long_msg[:500]
+    assert updated["last_agent_message_path"] == str(full_path)

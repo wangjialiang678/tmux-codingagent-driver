@@ -60,6 +60,7 @@ pip install -e .
 ```bash
 # Start a Codex job
 tcd start -p codex -m "Fix the bug in main.py" -d /path/to/project
+# Exit 3 means the session was kept but prompt delivery was not confirmed.
 
 # Start with git worktree isolation (parallel-safe)
 tcd start -p codex --worktree --wt-name auth -m "Implement auth module" -d /project
@@ -83,6 +84,9 @@ tcd output <job_id> --tail 20
 
 # Send a follow-up message
 tcd send <job_id> "Now add error handling"
+# send also exits 3 if delivery cannot be confirmed; recover composer text
+# with exactly one Enter and another observation:
+tcd nudge <job_id>
 
 # Merge worktree back to main branch
 tcd merge <job_id>
@@ -132,6 +136,7 @@ tcd -vv check <job_id>                  # DEBUG level
 | `tcd log <job_id> [--tail N] [--event TYPE]` | View job event log |
 | `tcd output <job_id> [--full] [--raw] [--tail N] [--since-line N]` | Get job output |
 | `tcd send <job_id> <message>` | Send follow-up message |
+| `tcd nudge <job_id> [--json]` | Send one Enter and verify composer submission |
 | `tcd merge <job_id> [--squash] [--no-cleanup]` | Merge worktree branch back to main |
 | `tcd jobs [--status S] [--json] [--no-reconcile]` | List all jobs (reconciles records against live tmux sessions first) |
 | `tcd attach <job_id>` | Attach to tmux session (debugging) |
@@ -203,6 +208,16 @@ For marker providers (`claude`, `gemini`), `idle` means the current turn is comp
 
 Claude Code can occasionally leave a follow-up in its queued input state after `tcd send`, showing `Press up to edit queued messages`. When tcd detects that hint immediately after sending, it automatically sends one extra Enter and records `job.message_submit_retry` in the event log.
 
+### Delivery confirmation
+
+`tcd start` and `tcd send` verify that the target TUI actually began working.
+They distinguish active work from text visibly stuck in the composer and from
+text that never arrived. A pasted message gets bounded Enter retries; only an
+absent message is resent. Exit code 3 means delivery was not confirmed, but
+the tmux session remains available. Use `tcd status <job_id> --json` to read
+`delivery` (`confirmed`, `unconfirmed`, `pending`, or `unknown`) and
+`last_event`, then use `tcd nudge <job_id>` when composer text is still visible.
+
 ## Observability
 
 ### Event Log
@@ -243,6 +258,13 @@ tcd status <job_id>        # Shows "Tokens: in=5000 out=3000"
 tcd status <job_id> --json # Includes total_tokens in JSON
 ```
 
+Codex notify payloads retain the historical 500-character
+`lastAgentMessage` field for compatibility. The authoritative complete final
+message is overwritten atomically at the path reported as
+`last_agent_message_path` (normally
+`~/.tcd/jobs/<job_id>.last-message.md`). Completion markers near the end of a
+response must be read from that full file, not from the 500-character field.
+
 ## Upstream Agent Integration
 
 **Claude Code users**: install the battle-tested skill instead of hand-rolling the
@@ -261,7 +283,8 @@ When tasks can be delegated to another AI agent:
    (stdin avoids shell-escaping breakage on prompts containing quotes)
 2. Poll for turn completion: `tcd check <job_id>` (0=idle/turn complete, 1=working)
 3. Get results: `tcd output <job_id>`
-4. Send follow-ups: `tcd send <job_id> "Additional instructions"`
+4. Send follow-ups: `tcd send <job_id> "Additional instructions"`; exit 3 means
+   delivery was not confirmed, so inspect status and run `tcd nudge <job_id>`
 5. Release the session when done: `tcd kill <job_id>` — it stays alive for
    follow-ups until killed
 

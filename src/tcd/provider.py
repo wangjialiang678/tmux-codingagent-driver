@@ -70,6 +70,9 @@ class Provider(ABC):
     # Substring to detect when the TUI is ready to accept input.
     # Override in subclasses. None means just use a fixed delay.
     tui_ready_indicator: str | None = None
+    # Placeholder rendered in an otherwise empty composer. Delivery checks
+    # ignore it when deciding whether user text is visibly stuck.
+    composer_placeholder: str | tuple[str, ...] | None = None
     # After the readiness indicator appears, require the pane to remain
     # unchanged for this many seconds before declaring the TUI ready. Guards
     # against indicators that appear in a startup banner before the TUI can
@@ -92,7 +95,6 @@ class Provider(ABC):
     working_markers: tuple[str, ...] = (
         "esc to interrupt",
         "esc to cancel",
-        "tokens used",
         "working (",
     )
     # Whether `--sandbox` means anything to this CLI. When False, tcd rejects

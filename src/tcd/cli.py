@@ -20,7 +20,13 @@ from tcd.config import ensure_dirs, job_signal_path, tmux_socket
 from tcd.diagnostics import Warning as DiagnosticWarning, diagnose
 from tcd.doctor import run_doctor
 from tcd.event_log import emit, load_events
-from tcd.readiness import WORKING_MARKERS, verify_prompt_delivery, wait_for_tui
+from tcd.readiness import (
+    WORKING_MARKERS,
+    observe_delivery,
+    verify_message_delivery,
+    verify_prompt_delivery,
+    wait_for_tui,
+)
 from tcd.job import Job, JobManager, _now_iso
 from tcd.output_cleaner import clean_output
 from tcd.provider import get_provider, list_providers
@@ -35,6 +41,27 @@ _RUNNING_IDLE_NOTE = (
     "For marker providers, idle can come from TCD_DONE or idle fallback; use `tcd output --full` "
     "and `tcd log` if you need to verify the marker."
 )
+
+
+def _delivery_and_last_event(job: Job) -> tuple[str, dict | None]:
+    """Derive the latest delivery conclusion and event summary for status."""
+    events = load_events(job.id)
+    delivery = job.delivery or "unknown"
+    for entry in events:
+        event = entry.get("event", "")
+        if event in {"job.prompt_sent", "job.message_sent"}:
+            delivery = "pending"
+        elif event in {"job.prompt_confirmed", "job.message_confirmed"}:
+            delivery = "confirmed"
+        elif event in {"job.prompt_unconfirmed", "job.message_unconfirmed"}:
+            delivery = "unconfirmed"
+        elif event == "job.nudge" and entry.get("result") in {"confirmed", "unconfirmed"}:
+            delivery = entry["result"]
+    last_event = None
+    if events:
+        last = events[-1]
+        last_event = {"type": last.get("event"), "time": last.get("ts")}
+    return delivery, last_event
 
 
 def _get_tmux() -> TmuxAdapter:
@@ -322,17 +349,24 @@ def start(
             raise RuntimeError("failed to send initial prompt to tmux session")
         logger.info("start %s: prompt sent (%d bytes, req_id=%s)", job.id, len(wrapped.encode("utf-8")), req_id)
         emit(job.id, "job.prompt_sent", bytes=len(wrapped.encode("utf-8")), req_id=req_id)
+        job.delivery = "pending"
+        mgr.save_job(job)
 
         # Verify the prompt actually landed and resend if it was dropped (e.g.
         # injected while a slow TUI was still initializing).
-        if getattr(prov, "verify_prompt_delivery", False):
-            verify_prompt_delivery(
+        delivery_confirmed = False
+        if getattr(prov, "verify_prompt_delivery", True):
+            delivery_confirmed = verify_prompt_delivery(
                 tmux,
                 job.tmux_session,
                 job.id,
                 wrapped,
                 markers=getattr(prov, "working_markers", WORKING_MARKERS),
+                tui_ready_indicator=getattr(prov, "tui_ready_indicator", None),
+                composer_placeholder=getattr(prov, "composer_placeholder", None),
             )
+        job.delivery = "confirmed" if delivery_confirmed else "unconfirmed"
+        mgr.save_job(job)
 
         if as_json:
             # Callers that script tcd need to read the job id without grepping
@@ -346,13 +380,23 @@ def start(
                 "worktree_path": job.worktree_path,
                 "worktree_branch": job.worktree_branch,
                 "acceptance_base_commit": job.acceptance_base_commit,
+                "delivery": job.delivery,
             }, ensure_ascii=False))
         else:
-            click.echo(f"Job started: {job.id}")
+            if delivery_confirmed:
+                click.echo(f"Job started: {job.id}")
+            else:
+                click.echo(
+                    f"Job started but prompt NOT confirmed: {job.id} "
+                    f"(prompt may sit in the composer; run: tcd send {job.id} \"\" "
+                    f"or tcd nudge {job.id})"
+                )
             click.echo(f"Provider: {provider}")
             if job.sandbox:
                 click.echo(f"Sandbox: {job.sandbox}")
             click.echo(f"tmux session: {job.tmux_session}")
+        if not delivery_confirmed:
+            sys.exit(3)
     except Exception as exc:
         if job.status != "failed":
             job.status = "failed"
@@ -414,9 +458,12 @@ def status(job_id: str, as_json: bool):
 
     # Refresh status if running
     _refresh_status(job, mgr)
+    delivery, last_event = _delivery_and_last_event(job)
 
     if as_json:
         d = job.to_dict()
+        d["delivery"] = delivery
+        d["last_event"] = last_event
         d["tmux_socket"] = job.tmux_socket if job.tmux_socket is not None else _get_job_tmux(job).socket
         d["elapsed_seconds"] = _elapsed(job)
         note = _running_idle_note(job)
@@ -428,6 +475,9 @@ def status(job_id: str, as_json: bool):
         click.echo(f"Provider: {job.provider}")
         click.echo(f"Socket:   {job.tmux_socket if job.tmux_socket is not None else _get_job_tmux(job).socket or 'default'}")
         click.echo(f"Status:   {job.status}")
+        click.echo(f"Delivery: {delivery}")
+        if last_event:
+            click.echo(f"Last evt: {last_event['type']} @ {last_event['time']}")
         click.echo(f"Turn:     {job.turn_count}")
         if job.turn_state:
             click.echo(f"State:    {job.turn_state}")
@@ -776,7 +826,8 @@ def wait(job_id: str, timeout: int):
 @click.argument("job_id")
 @click.argument("message", required=False)
 @click.option("--file", "file_path", default=None, help="Read message from file.")
-def send(job_id: str, message: str | None, file_path: str | None):
+@click.option("--json", "as_json", is_flag=True, help="Output delivery result as JSON.")
+def send(job_id: str, message: str | None, file_path: str | None, as_json: bool):
     """Send a follow-up message to a running job."""
     mgr = JobManager()
     job = mgr.load_job(job_id)
@@ -827,13 +878,83 @@ def send(job_id: str, message: str | None, file_path: str | None):
         req_id=req_id,
         turn=job.turn_count,
     )
+    job.delivery = "pending"
+    mgr.save_job(job)
     retry_queued_message_submission(tmux, job, prov, req_id)
+
+    delivery_confirmed = verify_message_delivery(
+        tmux,
+        job.tmux_session,
+        job.id,
+        wrapped,
+        markers=getattr(prov, "working_markers", WORKING_MARKERS),
+        tui_ready_indicator=getattr(prov, "tui_ready_indicator", None),
+        composer_placeholder=getattr(prov, "composer_placeholder", None),
+        req_id=req_id,
+        turn=job.turn_count,
+    )
 
     # Update job
     job.turn_state = "working"
+    job.delivery = "confirmed" if delivery_confirmed else "unconfirmed"
     mgr.save_job(job)
 
-    click.echo(f"Message sent to job {job_id}.")
+    if as_json:
+        click.echo(json.dumps({
+            "job_id": job.id,
+            "req_id": req_id,
+            "delivery": job.delivery,
+        }, ensure_ascii=False))
+    elif delivery_confirmed:
+        click.echo(f"Message sent and confirmed for job {job_id}.")
+    else:
+        click.echo(f"Message sent but NOT confirmed for job {job_id}.")
+    if not delivery_confirmed:
+        sys.exit(3)
+
+
+# ---------------------------------------------------------------------------
+# tcd nudge
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.argument("job_id")
+@click.option("--json", "as_json", is_flag=True, help="Output delivery result as JSON.")
+def nudge(job_id: str, as_json: bool):
+    """Submit composer text with one Enter, then verify activity."""
+    mgr = JobManager()
+    job = mgr.load_job(job_id)
+    if job is None:
+        click.echo(f"Error: job {job_id!r} not found.", err=True)
+        sys.exit(1)
+    if job.status != "running":
+        click.echo(f"Error: job {job_id} is not running (status={job.status}).", err=True)
+        sys.exit(1)
+
+    tmux = _get_job_tmux(job)
+    prov = get_provider(job.provider)
+    sent = bool(tmux.send_enter(job.tmux_session))
+    state = observe_delivery(
+        tmux,
+        job.tmux_session,
+        markers=getattr(prov, "working_markers", WORKING_MARKERS),
+        tui_ready_indicator=getattr(prov, "tui_ready_indicator", None),
+        composer_placeholder=getattr(prov, "composer_placeholder", None),
+        timeout_secs=4.0,
+    ) if sent else "absent"
+    result = "confirmed" if state == "running" else "unconfirmed"
+    job.delivery = result
+    if result == "confirmed":
+        job.turn_state = "working"
+    mgr.save_job(job)
+    emit(job.id, "job.nudge", result=result, observed_state=state, turn=job.turn_count)
+
+    if as_json:
+        click.echo(json.dumps({"job_id": job.id, "delivery": result}, ensure_ascii=False))
+    else:
+        click.echo(f"Nudge {result} for job {job.id}.")
+    if result != "confirmed":
+        sys.exit(3)
 
 
 # ---------------------------------------------------------------------------

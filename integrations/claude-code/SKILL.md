@@ -43,6 +43,9 @@ tcd start -p codex -m "<任务提示词>" -d "<项目绝对路径>" --timeout 10
 
 ### Step 2: 带进展汇报的轮询等待
 
+> **2026-09-09 起默认用监工脚本，不再手写轮询**：`python3 "/Users/michael/projects/AI 工作流/agent-owners/tools/tcd_watch.py" <job_id> <标签> --marker "[DONE:<包名>]" --max-minutes N`（后台跑）。它把"作业掉在地上"的情形变成可见状态并自动处置：未提交（Turn 0 输入框有滞留文字）→ 补回车；停滞（画面去计时器后 25 分钟不变）→ 报警；回合结束无完成标记 → 判断是提问还是半途，发催办（最多 2 次）；**合法停下**（汇报里出现"白名单之外 / 等待驱动方"）→ 不催办，退出码 7 交驱动方裁定；有完成标记 → 自动 `tcd verify` 并透传返回码。返回码：0 verify 通过 / 1 verify 失败 / 2 超时 / 3 未启动 / 4 停滞 / 5 催办后仍未完成 / 6 会话消失 / 7 白名单停下。观察日志写到 agent-owners 仓 `data/observations/tcd/<job>.jsonl`，详见本文末尾「监工与派单模板附则」。
+
+
 **禁止使用 `tcd wait`！** 它会阻塞整个 Claude Code 进程，用户在等待期间看不到任何输出。
 
 **必须使用轮询循环**，每轮做两件事：检查完成状态 + 获取增量输出展示给用户。
@@ -249,7 +252,7 @@ tcd start -p codex -d <dir> --timeout 45 \
 
 **配套纪律**：
 - 目标项目放 AGENTS.md 执行代理契约（对端是自动化驱动、技能审批门槛视为预批、勿为等子代理结束回合）——superpowers 官方规定 AGENTS.md 优先级高于技能
-- 模型无需更换：gpt-5.6-sol high 即编码旗舰；"写一半停"不是模型缺陷，是指令污染
+- **模型策略（王佳梁 2026-09-09 定）**：默认 `gpt-5.6-sol` + `model_reasoning_effort = "high"`（`~/.codex/config.toml` 全局值，tcd 不传 `--model` 时即用它）；`gpt-6-astra` 只用于架构讨论和重要复杂问题，按次 `tcd start --model gpt-6-astra`，不改全局。派单后看一眼 Codex 页脚的模型名核对（09-09 修复包 3/4 曾在不知情下跑了 astra medium）。"写一半停"不是模型缺陷，是指令污染
 - 若无人值守场景仍频繁被 multi_agent 中场空闲干扰，可对该场景单独 `-c features.multi_agent=false`
 
 ## 运行面验证（2026-08-20 起为交付标准动作）
@@ -291,11 +294,28 @@ tcd start -p codex -d <dir> --timeout 45 \
 
 **监督脚本坑**：解析 `tcd check --json` 时**直接管道**（`tcd check id --json | python3 -c ...`），不要先存变量再 `echo "$j"` 转传——JSON 里的转义序列会被 echo 吃掉导致连环误报（2026-08-31 三连误报实录）。TURN0_STUCK 告警在首轮工作中会误报，判卡死须同时满足 activity 为空。
 
-**停摆处置**（2026-09-07 更新：投递层已修，重派不再是首选）：
-- tcd ≥0.6.2 的投递校验分三态（running/pasted/absent）。**"prompt 文字可见但 turn_count=0"这个历史病症已由自动补发裸 Enter 修掉**，事件日志出现 `job.prompt_enter_retry` 即为该机制生效
+**停摆处置**（2026-09-09 更新：投递层已修，重派不再是首选）：
+- tcd ≥0.6.3 的 start/send 投递校验分三态（running/pasted/absent），且事件流必须出现 confirmed/unconfirmed 之一。`tcd start` 或 `tcd send` **退出码 3 = 投递未确认**，会话仍保留；输入框有滞留文字时先运行 `tcd nudge <id>`，不要直接操作 tmux send-keys
 - 仍然停摆时先分辨是哪一种：`tcd log <id> | grep prompt_` 看投递结论（confirmed/unconfirmed）；`tcd check --json` 看 activity 是否为空
   - `prompt_unconfirmed` + activity 空 → 投递确实失败，`tcd kill` 后重派
   - 已 confirmed 但长时间无活动 → 是模型侧卡住（额度/网络），`tcd send` 点名催一次；再无进展换 `codex exec` 非交互模式跑同一任务
 - ⚠️ **`tcd kill` 会连同 `--worktree` 创建的工作目录一起删除**——重派前先确认没有未提交产出；需要保留就用 `git worktree add` 手工建（kill 不碰它）
 
 **驱动方纪律**：验收提交只 `git add <该任务文件域>`，**永不 `git add -A`**——同仓并行的其他代理半成品会被卷入（2026-08-30 两次实录）。并行任务优先 `--worktree`。
+
+
+## 监工与派单模板附则（2026-09-09，来自修复包 3 / E0-A / E0-B 三单实战）
+
+**tcd 投递与完成信号（≥0.6.3）**
+- `tcd status --json` 的 `delivery` 和 `last_event` 是投递判定入口；事件流没有 prompt/message confirmed/unconfirmed 之一，就视为校验未发生。
+- job.json 与 .turn-complete 里的 `last_agent_message` 仍兼容截断到 **500 字符**；完整汇报读 `last_agent_message_path` 指向的 `<job_id>.last-message.md`，完成标记不得依赖 500 字符字段。
+- `tcd status` 的 `status=failed / error=killed by user` 只表示验收后被 kill，不代表失败；判完成看 `.turn-complete` + 最终汇报 + `tcd verify`。
+
+**派单模板必加的三句**
+1. 「最终汇报第一行与最后一行都写 `[DONE:<包名>]`（各自单独成行）。」
+2. 「不要停下来等确认——需要选择处按契约默认并写进回执『实施假设』。」
+3. 「只有白名单之外的文件必须改时才停下，且用固定措辞：`白名单之外：<文件路径>，等待驱动方`。」——监工据此识别合法停下；**自动催办等于授权**（修复包 3 曾因催办文本"如果没做完请继续"被当作允许改白名单外文件），所以合法停下一律交人。
+
+**验收纪律补充**
+- 监工的 verify 通过后，驱动方仍要自己复跑门并核 SUMMARY 行（守恒门曾静默失效两批，report 模式把崩溃吞成 rc=0）。
+- 执行代理写进索引/登记表的 ID 必须过对应校验器（修复包 3 写了不合法的 work_id，生成器拒绝后才发现）。

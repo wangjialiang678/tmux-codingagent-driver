@@ -98,6 +98,7 @@ The worktree path is stored in the job JSON so merge/cleanup can happen after th
 ### Event Logging & Diagnostics
 
 - `event_log.py`: Append-only JSONL event stream per job (`<id>.events.jsonl`). `emit(job_id, event, **data)` is fire-and-forget (never raises).
+- Dispatch delivery is valid only when the event stream contains one of the corresponding `confirmed` / `unconfirmed` events; otherwise treat verification as not having happened.
 - `diagnostics.py`: Rule-based health checks consuming event logs. Returns `Warning` objects with severity levels. Powers `tcd check --json` diagnostic output.
 - All path constants centralized in `config.py` (`TCD_HOME`, `JOBS_DIR`, `job_*_path()` helpers).
 

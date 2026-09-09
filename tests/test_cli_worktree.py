@@ -49,6 +49,7 @@ def _create_worktree_job(repo_root: Path, worktree_path: Path, *, persisted_repo
 def _mock_start_dependencies(monkeypatch, worktree_path: str) -> MagicMock:
     class FakeProvider:
         tui_ready_indicator = "READY"
+        working_markers = ("esc to interrupt",)
 
         def check_cli(self):
             return None
@@ -60,16 +61,20 @@ def _mock_start_dependencies(monkeypatch, worktree_path: str) -> MagicMock:
             return message
 
     class FakeTmux:
+        def __init__(self):
+            self.pane = "READY"
+
         def create_session(self, session, cmd, cwd):
             return True
 
         def capture_pane(self, session, **kwargs):
-            return "READY"
+            return self.pane
 
         def send_enter(self, session):
             return True
 
         def send_text(self, session, text):
+            self.pane = "Working (1s - esc to interrupt)"
             return True
 
     create_worktree_mock = MagicMock(return_value=Path(worktree_path))

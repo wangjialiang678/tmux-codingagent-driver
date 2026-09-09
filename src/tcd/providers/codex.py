@@ -194,6 +194,8 @@ class CodexProvider(Provider):
     name = "codex"
     cli_command = "codex"
     tui_ready_indicator = "›"
+    composer_placeholder = "Ask Codex to do anything"
+    working_markers = ("esc to interrupt", "working (")
     # Codex prints "› Use /skills to list available skills" in its startup
     # banner, so the indicator appears within ~0.5s — long before the TUI is
     # actually accepting input (MCP servers are still initializing). Injecting

@@ -4,6 +4,22 @@
 
 ### Fixed
 
+- **Start delivery checks no longer accept Codex's persistent `tokens used`
+  status bar as proof of a running turn.** Only transient provider activity
+  markers count, composer text takes precedence over stale activity, the
+  observation window scales from 4 to 20 seconds with prompt byte length, and
+  every check records either `job.prompt_confirmed` or
+  `job.prompt_unconfirmed`.
+- **Follow-up delivery is now verified.** `tcd send` uses the same
+  running/pasted/absent state machine, retries Enter for pasted text, resends
+  an absent message at most once, and exits 3 without killing the session when
+  delivery remains unconfirmed. `tcd nudge` provides a safe one-Enter recovery
+  command, while status exposes delivery and the latest event.
+- **Codex completion callbacks preserve the full final response.** The legacy
+  `lastAgentMessage` remains capped at 500 characters, while the complete text
+  is atomically written to `<job_id>.last-message.md` and its path is stored in
+  the job record.
+
 - **tcd now uses an isolated `tcd` tmux socket by default.** This prevents a
   different tool's `tmux kill-server` from terminating tcd executors. New job
   records persist their socket; pre-isolation records are found on `tcd` first

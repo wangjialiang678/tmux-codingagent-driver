@@ -431,6 +431,8 @@ def _run_live_check(report: DoctorReport, tmux: TmuxAdapter, prov: Any, timeout:
             PROBE_PROMPT,
             retries=0,
             markers=getattr(prov, "working_markers", WORKING_MARKERS),
+            tui_ready_indicator=getattr(prov, "tui_ready_indicator", None),
+            composer_placeholder=getattr(prov, "composer_placeholder", None),
             timeout_secs=_remaining_seconds(deadline),
         )
         if not delivered:

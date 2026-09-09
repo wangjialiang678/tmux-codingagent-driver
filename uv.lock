@@ -91,6 +91,7 @@ wheels = [
 
 [[package]]
 name = "tcd"
+version = "0.6.3"
 source = { editable = "." }
 dependencies = [
     { name = "click" },

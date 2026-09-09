@@ -53,6 +53,8 @@ class Job:
     turn_count: int = 0
     turn_state: Literal["working", "idle", "context_limit"] | None = None
     last_agent_message: str | None = None
+    last_agent_message_path: str | None = None
+    delivery: Literal["confirmed", "unconfirmed", "pending", "unknown"] = "unknown"
     timeout_minutes: int = 60
     sandbox: str | None = None
     worktree_path: str | None = None
