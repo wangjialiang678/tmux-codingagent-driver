@@ -192,6 +192,20 @@ stash 栈是**仓库级共享**且**位置寻址**的，所以并发 job 必须�
 
 tcd 原本只有一个概念：**turn（一轮对话）**。`tcd check` 退出 0 = 这一轮空闲了。
 
+这里的 turn 专指根 Codex 线程处理一次用户输入的回合，不包含它通过
+`thread_spawn` 派生出的子代理回合。Codex 0.153.4 的 legacy notify payload 只有
+`thread-id`，没有 parent/session id；hook 会先把原始 callback 追加到
+`~/.tcd/jobs/<id>.notify.jsonl`，再用该 `thread-id` 对应 rollout 的
+`session_meta.thread_source` 判别。子代理完成只累加 `subagent_turns`，不会增加
+`turn_count`、把根状态改成 idle，或覆盖根线程的完成信号和最后消息。元数据无法读取时
+保留旧的完成处理，以免吞掉真实根回合。
+
+Codex 的信号文件还要通过一次 pane 状态校验：末尾 20 行仍有 `Working (`、
+`esc to interrupt` 或 `Waiting for agents` 时，完成判定为 inconclusive，调用方继续
+轮询。默认启用；排障或兼容旧 TUI 时可设置 `TCD_CODEX_PANE_VALIDATION=0` 关闭。
+`tcd status --json` 和 `tcd check --json` 分别暴露 `subagent_turns` 与
+`pane_working`，供上层监工交叉验证。
+
 但调用方要的是**任务完成**，二者不等价：agent 会自己 spawn 子代理、会写完测试就
 停在空输入框。v0.5.0 起这个语义进入架构：
 

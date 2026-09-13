@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +41,15 @@ def _last_message_path(job_id: str) -> Path:
     return _jobs_dir() / f"{job_id}.last-message.md"
 
 
+def _notify_log_path(job_id: str) -> Path:
+    return _jobs_dir() / f"{job_id}.notify.jsonl"
+
+
+def _codex_sessions_dir() -> Path:
+    codex_home = os.environ.get("CODEX_HOME")
+    return (Path(codex_home) if codex_home else Path.home() / ".codex") / "sessions"
+
+
 def _atomic_write_text(path: Path, text: str) -> None:
     """Replace *path* atomically so readers never see a partial message."""
     import os
@@ -54,6 +64,76 @@ def _atomic_write_text(path: Path, text: str) -> None:
     except Exception:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+def _append_raw_payload(job_id: str, raw_payload: str) -> None:
+    """Append the exact callback payload for later wire-format diagnosis."""
+    path = _notify_log_path(job_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(raw_payload)
+        if not raw_payload.endswith("\n"):
+            f.write("\n")
+
+
+def _thread_metadata(thread_id: str) -> dict | None:
+    """Read the session metadata for *thread_id* from its Codex rollout.
+
+    Codex 0.153.4's legacy notify payload exposes ``thread-id`` but not the
+    parent/session id.  The rollout named with that thread id contains the
+    missing ``thread_source`` and ``source.subagent.thread_spawn`` metadata.
+    """
+    if not thread_id:
+        return None
+    try:
+        matches = _codex_sessions_dir().rglob(f"rollout-*-{thread_id}.jsonl")
+        for path in matches:
+            with path.open(encoding="utf-8", errors="replace") as f:
+                for _ in range(20):
+                    line = f.readline()
+                    if not line:
+                        break
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if entry.get("type") != "session_meta":
+                        continue
+                    metadata = entry.get("payload")
+                    if isinstance(metadata, dict) and metadata.get("id") == thread_id:
+                        return metadata
+    except OSError:
+        logger.debug("Could not inspect Codex rollout for thread %s", thread_id)
+    return None
+
+
+def _is_subagent_payload(payload: dict) -> bool | None:
+    """Classify a notify callback, returning None when identity is unknown."""
+    thread_id = payload.get("thread-id") or payload.get("thread_id")
+    session_id = payload.get("session-id") or payload.get("session_id")
+    parent_id = payload.get("parent-thread-id") or payload.get("parent_thread_id")
+    thread_source = payload.get("thread-source") or payload.get("thread_source")
+
+    if parent_id:
+        return True
+    if thread_source:
+        return thread_source == "subagent"
+    if thread_id and session_id:
+        return thread_id != session_id
+
+    metadata = _thread_metadata(str(thread_id or ""))
+    if metadata is None:
+        return None
+    if metadata.get("thread_source") == "subagent":
+        return True
+    source = metadata.get("source")
+    if isinstance(source, dict) and isinstance(source.get("subagent"), dict):
+        return True
+    if metadata.get("id") and metadata.get("session_id"):
+        return metadata["id"] != metadata["session_id"]
+    if metadata.get("thread_source") == "user":
+        return False
+    return None
 
 
 def _is_title_generation(message: str) -> bool:
@@ -71,6 +151,11 @@ def _is_title_generation(message: str) -> bool:
 def handle_notify(job_id: str, raw_payload: str) -> None:
     """Process a Codex notify-hook callback."""
     try:
+        _append_raw_payload(job_id, raw_payload)
+    except OSError:
+        logger.warning("Could not append raw notify payload for job %s", job_id)
+
+    try:
         payload = json.loads(raw_payload)
     except (json.JSONDecodeError, TypeError):
         logger.warning("Invalid payload for job %s: %r", job_id, raw_payload)
@@ -86,6 +171,22 @@ def handle_notify(job_id: str, raw_payload: str) -> None:
     # Extract data from payload
     turn_id = payload.get("turn-id", "")
     full_last_msg = payload.get("last-assistant-message", "")
+    is_subagent = _is_subagent_payload(payload)
+    if is_subagent:
+        _update_subagent_turns(job_id)
+        logger.info(
+            "Notify hook: job %s subagent turn ignored (thread_id=%s, turn_id=%s)",
+            job_id,
+            payload.get("thread-id", ""),
+            turn_id,
+        )
+        return
+    if is_subagent is None and payload.get("thread-id"):
+        logger.warning(
+            "Notify hook: job %s could not classify thread %s; preserving legacy root-turn behavior",
+            job_id,
+            payload.get("thread-id"),
+        )
     if _is_title_generation(full_last_msg):
         # Codex generates a session title in a separate, asynchronous agent turn whose
         # only output is {"title": "..."}. It can complete *after* the real reply and
@@ -149,6 +250,21 @@ def _update_job(
         os.replace(tmp, job_path)
     except Exception as exc:
         logger.error("Failed to update job %s: %s", job_id, exc)
+
+
+def _update_subagent_turns(job_id: str) -> None:
+    """Count a child completion without changing the root turn's state."""
+    job_path = _job_json_path(job_id)
+    if not job_path.exists():
+        logger.warning("Job file not found: %s", job_path)
+        return
+
+    try:
+        data = json.loads(job_path.read_text())
+        data["subagent_turns"] = data.get("subagent_turns", 0) + 1
+        _atomic_write_text(job_path, json.dumps(data, indent=2, ensure_ascii=False))
+    except Exception as exc:
+        logger.error("Failed to update subagent count for job %s: %s", job_id, exc)
 
 
 def main() -> None:

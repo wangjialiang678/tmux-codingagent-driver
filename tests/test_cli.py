@@ -312,10 +312,14 @@ def test_status_running_idle_explains_turn_complete_not_job_complete(runner, tmp
 
 def test_status_json(runner, tmp_jobs):
     job = _create_test_job(tmp_jobs, status="completed")
+    job.subagent_turns = 2
+    JobManager().save_job(job)
     result = runner.invoke(cli, ["status", job.id, "--json"])
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert data["id"] == job.id
+    assert data["subagent_turns"] == 2
+    assert data["pane_working"] is False
 
 
 def test_status_marks_failed_if_session_disappears_while_working(runner, tmp_jobs):
@@ -439,10 +443,44 @@ def test_check_json_includes_diagnostics_and_pane_tail(runner, tmp_jobs, monkeyp
     data = json.loads(result.output)
     assert data["state"] == "working"
     assert data["turn_count"] == job.turn_count
+    assert data["subagent_turns"] == 0
+    assert data["pane_working"] is False
     assert data["pane_tail"] == "l3\nl4\nl5\nl6\nl7"
     assert data["warnings"] == [
         {"code": "TEST_WARNING", "severity": "warn", "message": "test message"}
     ]
+
+
+def test_check_json_reports_pane_working_for_codex_marker(runner, tmp_jobs, monkeypatch):
+    from tcd.providers.codex import CodexProvider
+
+    job = _create_test_job(tmp_jobs, status="running", provider="codex")
+    signal_path = tmp_jobs / f"{job.id}.turn-complete"
+    signal_path.write_text(json.dumps({
+        "turnId": "child-turn", "lastAgentMessage": "child summary"
+    }))
+
+    class FakeTmux:
+        def session_exists(self, name):
+            return True
+
+        def capture_pane(self, session, **kwargs):
+            return "• Waiting for agents\n  Working (2m • esc to interrupt)"
+
+    provider = CodexProvider()
+    monkeypatch.setattr("tcd.cli.TmuxAdapter", FakeTmux)
+    monkeypatch.setattr("tcd.cli.get_provider", lambda _name: provider)
+    monkeypatch.setattr("tcd.providers.codex.job_signal_path", lambda _jid: signal_path)
+    monkeypatch.setattr(
+        "tcd.providers.codex.TmuxAdapter.for_job", lambda _job: FakeTmux()
+    )
+    monkeypatch.delenv("TCD_CODEX_PANE_VALIDATION", raising=False)
+
+    result = runner.invoke(cli, ["check", job.id, "--json"])
+    assert result.exit_code == 1
+    data = json.loads(result.output)
+    assert data["state"] == "working"
+    assert data["pane_working"] is True
 
 
 def test_check_json_not_found(runner, tmp_jobs):
@@ -453,6 +491,8 @@ def test_check_json_not_found(runner, tmp_jobs):
     assert data["state"] == "not_found"
     assert data["elapsed_s"] == 0
     assert data["turn_count"] == 0
+    assert data["subagent_turns"] == 0
+    assert data["pane_working"] is False
     assert data["warnings"] == []
     assert data["pane_tail"] == ""
 

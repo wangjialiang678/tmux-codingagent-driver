@@ -459,6 +459,7 @@ def status(job_id: str, as_json: bool):
     # Refresh status if running
     _refresh_status(job, mgr)
     delivery, last_event = _delivery_and_last_event(job)
+    pane_working = _job_pane_working(job)
 
     if as_json:
         d = job.to_dict()
@@ -466,6 +467,7 @@ def status(job_id: str, as_json: bool):
         d["last_event"] = last_event
         d["tmux_socket"] = job.tmux_socket if job.tmux_socket is not None else _get_job_tmux(job).socket
         d["elapsed_seconds"] = _elapsed(job)
+        d["pane_working"] = pane_working
         note = _running_idle_note(job)
         if note:
             d["state_note"] = note
@@ -479,6 +481,8 @@ def status(job_id: str, as_json: bool):
         if last_event:
             click.echo(f"Last evt: {last_event['type']} @ {last_event['time']}")
         click.echo(f"Turn:     {job.turn_count}")
+        click.echo(f"Subagent: {job.subagent_turns}")
+        click.echo(f"Pane work:{' yes' if pane_working else ' no'}")
         if job.turn_state:
             click.echo(f"State:    {job.turn_state}")
         if job.error:
@@ -585,6 +589,8 @@ def check(job_id: str, as_json: bool):
                         "state": "not_found",
                         "elapsed_s": 0,
                         "turn_count": 0,
+                        "subagent_turns": 0,
+                        "pane_working": False,
                         "warnings": [],
                         "pane_tail": "",
                     },
@@ -597,6 +603,7 @@ def check(job_id: str, as_json: bool):
 
     state = "working"
     exit_code = 1
+    completion_pane_working: bool | None = None
 
     if job.status in ("completed", "failed"):
         state = job.status
@@ -608,6 +615,7 @@ def check(job_id: str, as_json: bool):
         try:
             prov = get_provider(job.provider)
             result = prov.detect_completion(job)
+            completion_pane_working = getattr(prov, "last_pane_working", None)
         except (json.JSONDecodeError, OSError, ValueError, KeyError):
             logger.exception("Provider completion check failed for job %s", job.id)
             result = None
@@ -654,6 +662,7 @@ def check(job_id: str, as_json: bool):
 
     if as_json:
         pane_tail = ""
+        pane_working = False
         activity_lines: list[str] = []
         scrollback = None
         try:
@@ -661,6 +670,9 @@ def check(job_id: str, as_json: bool):
             pane = tmux.capture_pane(job.tmux_session)
             if pane:
                 pane_tail = "\n".join(pane.splitlines()[-5:])
+                pane_working = _pane_text_is_working(job, "\n".join(pane.splitlines()[-20:]))
+            if completion_pane_working is not None:
+                pane_working = completion_pane_working
             # Grab more scrollback to extract meaningful activity
             scrollback = tmux.capture_pane(job.tmux_session, start_line="-200")
             if scrollback:
@@ -683,6 +695,8 @@ def check(job_id: str, as_json: bool):
             "state": state,
             "elapsed_s": _elapsed(job),
             "turn_count": job.turn_count,
+            "subagent_turns": job.subagent_turns,
+            "pane_working": pane_working,
             "warnings": [
                 {"code": w.code, "severity": w.severity, "message": w.message}
                 for w in diag_warnings
@@ -1296,6 +1310,30 @@ def _advance_turn_if_needed(job: Job) -> None:
     """Advance turn counter once when marker-based providers finish a working turn."""
     if job.provider in _MARKER_PROVIDERS and job.turn_state == "working":
         job.turn_count += 1
+
+
+def _pane_text_is_working(job: Job, pane: str | None) -> bool:
+    """Interpret only the live pane tail using provider activity markers."""
+    try:
+        provider = get_provider(job.provider)
+        checker = getattr(provider, "pane_looks_working", None)
+        if checker is not None:
+            return bool(checker(pane))
+        text = (pane or "").casefold()
+        return any(marker.casefold() in text for marker in provider.working_markers)
+    except Exception:
+        return False
+
+
+def _job_pane_working(job: Job) -> bool:
+    """Capture the current status area for status/check observability."""
+    if job.status != "running":
+        return False
+    try:
+        pane = _get_job_tmux(job).capture_pane(job.tmux_session, start_line="-20")
+    except Exception:
+        return False
+    return _pane_text_is_working(job, pane)
 
 
 def _accumulate_tokens(job: Job, tokens: dict[str, int] | None) -> None:

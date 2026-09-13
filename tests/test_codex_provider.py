@@ -149,6 +149,57 @@ def test_detect_completion_with_signal(provider, job, tmp_path, monkeypatch):
     assert result.last_agent_message == "done"
 
 
+@pytest.mark.parametrize("pane", [
+    "• Working (3m 43s • esc to interrupt)",
+    "• Waiting for agents\n  └ 3 agents running",
+])
+def test_detect_completion_signal_is_inconclusive_while_pane_working(
+    provider, job, tmp_path, monkeypatch, pane
+):
+    signal_path = tmp_path / f"{job.id}.turn-complete"
+    signal_path.write_text(json.dumps({
+        "turnId": "child-turn",
+        "lastAgentMessage": "child summary",
+    }))
+    monkeypatch.setattr("tcd.providers.codex.job_signal_path", lambda jid: signal_path)
+    monkeypatch.delenv("TCD_CODEX_PANE_VALIDATION", raising=False)
+
+    class FakeTmux:
+        def capture_pane(self, session, **kwargs):
+            return pane
+
+    monkeypatch.setattr(
+        "tcd.providers.codex.TmuxAdapter.for_job",
+        lambda _job: FakeTmux(),
+    )
+
+    assert provider.detect_completion(job) is None
+
+
+def test_detect_completion_pane_validation_can_be_disabled(
+    provider, job, tmp_path, monkeypatch
+):
+    signal_path = tmp_path / f"{job.id}.turn-complete"
+    signal_path.write_text(json.dumps({
+        "turnId": "t1", "lastAgentMessage": "done"
+    }))
+    monkeypatch.setattr("tcd.providers.codex.job_signal_path", lambda jid: signal_path)
+    monkeypatch.setenv("TCD_CODEX_PANE_VALIDATION", "0")
+
+    class UnexpectedTmux:
+        def capture_pane(self, session, **kwargs):
+            raise AssertionError("pane must not be captured when validation is disabled")
+
+    monkeypatch.setattr(
+        "tcd.providers.codex.TmuxAdapter.for_job",
+        lambda _job: UnexpectedTmux(),
+    )
+
+    result = provider.detect_completion(job)
+    assert result is not None
+    assert result.state == "idle"
+
+
 def test_detect_completion_with_tokens(provider, job, tmp_path, monkeypatch):
     """Phase 4: detect_completion extracts tokens from NDJSON session."""
     signal_path = tmp_path / f"{job.id}.turn-complete"

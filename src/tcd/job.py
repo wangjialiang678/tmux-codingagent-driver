@@ -51,6 +51,7 @@ class Job:
     result: str | None = None
     error: str | None = None
     turn_count: int = 0
+    subagent_turns: int = 0
     turn_state: Literal["working", "idle", "context_limit"] | None = None
     last_agent_message: str | None = None
     last_agent_message_path: str | None = None

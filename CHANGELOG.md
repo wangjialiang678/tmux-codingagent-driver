@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **Codex subagent callbacks no longer masquerade as root-turn completion.**
+  Raw legacy notify payloads are appended to `<job_id>.notify.jsonl`; their
+  `thread-id` is resolved against rollout session metadata, and identified
+  subagent turns only increment `subagent_turns`. Completion signals are also
+  rejected while the live pane still shows `Working`, `esc to interrupt`, or
+  `Waiting for agents` (disable with `TCD_CODEX_PANE_VALIDATION=0`). JSON status
+  and check output now include `pane_working`.
+
 - **Codex title-generation turns no longer count as agent turns.** The async
   `{"title": ...}` callback could arrive after the real reply and overwrite
   `<job_id>.last-message.md` while bumping `turn_count`; it is now recorded as

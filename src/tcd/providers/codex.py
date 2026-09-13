@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 MODEL_RE = re.compile(r"^[a-zA-Z0-9._:/-]+$")
+PANE_VALIDATION_ENV = "TCD_CODEX_PANE_VALIDATION"
 
 # Top-level MCP server table headers, e.g. ``[mcp_servers.brave-search]`` (the
 # capture stops before any sub-table such as ``[mcp_servers.node_repl.env]``).
@@ -196,6 +197,7 @@ class CodexProvider(Provider):
     tui_ready_indicator = "›"
     composer_placeholder = "Ask Codex to do anything"
     working_markers = ("esc to interrupt", "working (")
+    last_pane_working: bool | None = None
     # Codex prints "› Use /skills to list available skills" in its startup
     # banner, so the indicator appears within ~0.5s — long before the TUI is
     # actually accepting input (MCP servers are still initializing). Injecting
@@ -208,6 +210,28 @@ class CodexProvider(Provider):
     verify_prompt_delivery = True
     # `codex -s <mode>` is real; see build_launch_command.
     supports_sandbox = True
+
+    @staticmethod
+    def pane_validation_enabled() -> bool:
+        """Whether signal-file completion must agree with the live pane."""
+        raw = os.environ.get(PANE_VALIDATION_ENV, "1")
+        return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+    def pane_looks_working(self, pane: str | None) -> bool:
+        """Return True when the Codex status area proves the root is active."""
+        text = (pane or "").casefold()
+        markers = (*self.working_markers, "waiting for agents")
+        return any(marker.casefold() in text for marker in markers)
+
+    def _root_pane_is_working(self, job: Job) -> bool:
+        try:
+            pane = TmuxAdapter.for_job(job).capture_pane(
+                job.tmux_session, start_line="-20"
+            )
+        except Exception:
+            logger.debug("Failed to validate Codex pane for job %s", job.id)
+            return False
+        return self.pane_looks_working(pane)
 
     def check_cli(self) -> None:
         if shutil.which(self.cli_command) is None:
@@ -292,8 +316,17 @@ class CodexProvider(Provider):
 
     def detect_completion(self, job: Job) -> CompletionResult | None:
         """Check signal file written by notify hook."""
+        self.last_pane_working = None
         signal_path = job_signal_path(job.id)
         if signal_path.exists():
+            if self.pane_validation_enabled():
+                self.last_pane_working = self._root_pane_is_working(job)
+            if self.last_pane_working:
+                logger.info(
+                    "Ignoring completion signal for job %s while Codex pane is working",
+                    job.id,
+                )
+                return None
             try:
                 data = json.loads(signal_path.read_text())
                 tokens = self._extract_tokens(job)
