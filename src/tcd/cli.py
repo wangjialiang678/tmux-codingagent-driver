@@ -20,6 +20,12 @@ from tcd.config import ensure_dirs, job_signal_path, tmux_socket
 from tcd.diagnostics import Warning as DiagnosticWarning, diagnose
 from tcd.doctor import run_doctor
 from tcd.event_log import emit, load_events
+from tcd.liveness import (
+    DEFAULT_SILENCE_SECONDS,
+    DEFAULT_WORKING_MARKERS,
+    assess as assess_liveness,
+    warning_for,
+)
 from tcd.readiness import (
     WORKING_MARKERS,
     observe_delivery,
@@ -460,6 +466,7 @@ def status(job_id: str, as_json: bool):
     _refresh_status(job, mgr)
     delivery, last_event = _delivery_and_last_event(job)
     pane_working = _job_pane_working(job)
+    live = _job_liveness(job) if job.status == "running" else None
 
     if as_json:
         d = job.to_dict()
@@ -468,6 +475,8 @@ def status(job_id: str, as_json: bool):
         d["tmux_socket"] = job.tmux_socket if job.tmux_socket is not None else _get_job_tmux(job).socket
         d["elapsed_seconds"] = _elapsed(job)
         d["pane_working"] = pane_working
+        if live is not None:
+            d["liveness"] = live.to_dict()
         note = _running_idle_note(job)
         if note:
             d["state_note"] = note
@@ -483,6 +492,15 @@ def status(job_id: str, as_json: bool):
         click.echo(f"Turn:     {job.turn_count}")
         click.echo(f"Subagent: {job.subagent_turns}")
         click.echo(f"Pane work:{' yes' if pane_working else ' no'}")
+        if live is not None:
+            quiet = f"{live.silence_s}s" if live.silence_s is not None else "unknown"
+            click.echo(f"Liveness: {live.verdict} (screen={live.pane.state}, log quiet {quiet})")
+            if live.verdict not in ("progressing", "turn_just_ended"):
+                click.echo(f"          {live.advice}")
+                if live.pane.recover_at:
+                    click.echo(f"          try again at {live.pane.recover_at}")
+                for line in live.pane.evidence:
+                    click.echo(f"          | {line}")
         if job.turn_state:
             click.echo(f"State:    {job.turn_state}")
         if job.error:
@@ -571,11 +589,26 @@ def log_events(job_id: str, tail: int | None, event_filter: str | None):
 @cli.command()
 @click.argument("job_id")
 @click.option("--json", "as_json", is_flag=True, help="Output state and diagnostics as JSON.")
-def check(job_id: str, as_json: bool):
+@click.option(
+    "--silence-seconds",
+    type=click.IntRange(min=1),
+    default=DEFAULT_SILENCE_SECONDS,
+    show_default=True,
+    help="How long the job log may go unwritten before silence counts against it. "
+         "Raise it for jobs that legitimately run a long quiet test suite.",
+)
+def check(job_id: str, as_json: bool, silence_seconds: int):
     """Non-blocking completion check.
 
     Reports whether the current *turn* is idle. That is not the same as the task
     being done — use `tcd verify` for that.
+
+    `--json` also carries a `liveness` block answering the separate question "is
+    this job actually moving": the mtime of its log versus the state of its last
+    screen (`working` / `awaiting_input` / `blocked` / `idle_prompt` /
+    `unknown`). Read that, not `state`, to decide whether a job is alive —
+    `state` only reports our own bookkeeping, and an agent parked on a
+    usage-limit notice or a keypress prompt still reads as `working`.
 
     Exit codes: 0=idle/completed, 1=working, 2=context_limit, 3=not_found, 4=failed
     """
@@ -665,6 +698,7 @@ def check(job_id: str, as_json: bool):
         pane_working = False
         activity_lines: list[str] = []
         scrollback = None
+        pane = None
         try:
             tmux = _get_job_tmux(job)
             pane = tmux.capture_pane(job.tmux_session)
@@ -682,6 +716,12 @@ def check(job_id: str, as_json: bool):
             logger.exception("Failed to capture pane for diagnostics for job %s", job.id)
 
         diag_warnings = diagnose(job, pane_tail=pane_tail or None)
+        live = _job_liveness(job, pane, silence_s=silence_seconds) if job.status == "running" else None
+        if live is not None:
+            hit = warning_for(live)
+            if hit:
+                code, message, severity = hit
+                diag_warnings.append(DiagnosticWarning(code=code, message=message, severity=severity))
         provider_error = _detect_provider_error(job, scrollback or pane_tail)
         if provider_error:
             diag_warnings.append(
@@ -704,6 +744,11 @@ def check(job_id: str, as_json: bool):
             "pane_tail": pane_tail,
             "activity": activity_lines,
         }
+        # `state` answers "is the turn idle"; `liveness` answers the different
+        # question "is this job moving, and if not why" — never infer the second
+        # from the first (see tcd.liveness).
+        if live is not None:
+            payload["liveness"] = live.to_dict()
         # Turn idle is not task complete. When a contract was declared, say so
         # explicitly rather than leaving the caller to infer it from `state`.
         if has_contract(job):
@@ -1334,6 +1379,38 @@ def _job_pane_working(job: Job) -> bool:
     except Exception:
         return False
     return _pane_text_is_working(job, pane)
+
+
+def _job_liveness(job: Job, pane: str | None = None, *, silence_s: int | None = None):
+    """Answer "is this job actually moving" from evidence outside our own state.
+
+    `state`/`turn_state` are our bookkeeping; they said "working" for an hour on
+    2026-09-17 while six jobs sat dead at a usage-limit notice. The log mtime is
+    the filesystem's account and the pane text is the agent's own — so the
+    verdict is built from those two, crossed.
+    """
+    try:
+        if pane is None:
+            pane = _get_job_tmux(job).capture_pane(job.tmux_session, start_line="-40")
+        provider = get_provider(job.provider)
+        placeholder = provider.composer_placeholder or ()
+        if isinstance(placeholder, str):
+            placeholder = (placeholder,)
+        # Union, not just the provider's own list: the markers only ever veto a
+        # "it stopped" verdict, so a wider net is the cautious direction — and
+        # it picks up spellings a provider knows about in `pane_looks_working`
+        # but does not carry in `working_markers` (Codex's "Waiting for agents").
+        markers = tuple(dict.fromkeys((*provider.working_markers, *DEFAULT_WORKING_MARKERS)))
+        return assess_liveness(
+            job.id,
+            pane,
+            working_markers=markers,
+            composer_placeholders=placeholder,
+            silence_threshold_s=silence_s or DEFAULT_SILENCE_SECONDS,
+        )
+    except Exception:
+        logger.debug("liveness assessment failed for job %s", job.id, exc_info=True)
+        return None
 
 
 def _accumulate_tokens(job: Job, tokens: dict[str, int] | None) -> None:

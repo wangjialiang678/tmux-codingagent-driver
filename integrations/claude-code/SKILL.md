@@ -43,7 +43,7 @@ tcd start -p codex -m "<任务提示词>" -d "<项目绝对路径>" --timeout 10
 
 ### Step 2: 带进展汇报的轮询等待
 
-> **2026-09-09 起默认用监工脚本，不再手写轮询**：`python3 "/Users/michael/projects/AI 工作流/agent-owners/tools/tcd_watch.py" <job_id> <标签> --marker "[DONE:<包名>]" --max-minutes N`（后台跑）。它把"作业掉在地上"的情形变成可见状态并自动处置：未提交（Turn 0 输入框有滞留文字）→ 补回车；停滞（画面去计时器后 25 分钟不变）→ 报警；回合结束无完成标记 → 判断是提问还是半途，发催办（最多 2 次）；**合法停下**（汇报里出现"白名单之外 / 等待驱动方"）→ 不催办，退出码 7 交驱动方裁定；有完成标记 → 自动 `tcd verify` 并透传返回码。返回码：0 verify 通过 / 1 verify 失败 / 2 超时 / 3 未启动 / 4 停滞 / 5 催办后仍未完成 / 6 会话消失 / 7 白名单停下。观察日志写到 agent-owners 仓 `data/observations/tcd/<job>.jsonl`，详见本文末尾「监工与派单模板附则」。**tcd ≥0.6.4 起监工不再直接碰 tmux**：状态取 `tcd status --json`（delivery / turn_count / last_event / last_agent_message_path），补回车用 `tcd nudge`（每次都是事件流里的 `job.nudge`），完成标记从 `<job>.last-message.md` 整行精确匹配；老版 tcd 自动降级。
+> **2026-09-09 起默认用监工脚本，不再手写轮询**：`python3 "/Users/michael/projects/AI 工作流/agent-owners/tools/tcd_watch.py" <job_id> <标签> --marker "[DONE:<包名>]" --max-minutes N`（后台跑）。它把"作业掉在地上"的情形变成可见状态并自动处置：未提交（Turn 0 输入框有滞留文字）→ 补回车；停滞（画面去计时器后 25 分钟不变）→ 报警；回合结束无完成标记 → 判断是提问还是半途，发催办（最多 2 次）；**合法停下**（汇报里出现"白名单之外 / 等待驱动方"）→ 不催办，退出码 7 交驱动方裁定；有完成标记 → 自动 `tcd verify` 并透传返回码。返回码：0 verify 通过 / 1 verify 失败 / 2 超时 / 3 未启动 / 4 停滞 / 5 催办后仍未完成 / 6 会话消失 / 7 白名单停下 / **8 卡在需要按键的提示** / **9 明确干不下去（额度、鉴权、重试耗尽；带屏幕上的恢复时间）** / **10 屏幕认不出且已静默（带末屏原文）**。8/9/10 是 2026-09-17 夜新增的活性门（`--silence-minutes`，默认 20；测试重的包调大），判据是日志 mtime × 末屏状态，详见下文「怎么判断作业是真在跑」。观察日志写到 agent-owners 仓 `data/observations/tcd/<job>.jsonl`，详见本文末尾「监工与派单模板附则」。**tcd ≥0.6.4 起监工不再直接碰 tmux**：状态取 `tcd status --json`（delivery / turn_count / last_event / last_agent_message_path），补回车用 `tcd nudge`（每次都是事件流里的 `job.nudge`），完成标记从 `<job>.last-message.md` 整行精确匹配；老版 tcd 自动降级。
 
 
 **禁止使用 `tcd wait`！** 它会阻塞整个 Claude Code 进程，用户在等待期间看不到任何输出。
@@ -100,11 +100,14 @@ tcd output <job_id> --since-line <_last_line> 2>/dev/null
 2. 解析 JSON 中的 `state`：
    - `"idle"` / `"completed"` → 进入 Step 3
    - `"context_limit"` → Codex 上下文已满，需要重启新 job 或结束
-   - `"working"` → 继续轮询
+   - `"working"` → 继续轮询。⚠️ **`state: "working"` 不等于它在干活**——它只反映我方的回合记账。要回答"它还在跑吗"，看同一份 JSON 里的 `liveness` 块（日志 mtime × 末屏状态），见下文「怎么判断作业是真在跑」。2026-09-17 夜六单全停时，`state` 整整一小时都是 `working`
 3. **检查 `warnings` 并自动响应**：
    - `SANDBOX_MISMATCH` → 告知用户 Codex 可能无法写入文件，建议加 `--sandbox danger-full-access` 重启
    - `PERMISSION_ERROR` → 告知用户 Codex 遇到权限问题
-   - `STALL` → Codex 可能卡住，用 `activity` 分析原因
+   - `STALL` / `NO_PROGRESS` → Codex 可能卡住，用 `activity` 与 `liveness` 分析原因
+   - `BLOCKED` → 屏幕明说干不下去（额度/鉴权/重试耗尽），带 `recover_at` 时告诉用户等到几点；**交人，不要催办**
+   - `AWAITING_INPUT` → 卡在需要按键的提示，**不要替它按键**（可能换模型、花钱），交人
+   - `UNKNOWN_PANE` → 屏幕认不出来，把 `liveness.pane_tail` 原样贴给用户，**不要报成"在跑"**
    - `TURN0_STUCK` → TUI 可能没启动成功，建议 `tcd attach` 查看
 4. **向用户展示 Codex 真实反馈**（核心改进）：
    - **直接展示** `activity` 数组中的内容，不要自己总结
@@ -294,6 +297,99 @@ tcd start -p codex -d <dir> --timeout 45 \
 
 **监督脚本坑**：解析 `tcd check --json` 时**直接管道**（`tcd check id --json | python3 -c ...`），不要先存变量再 `echo "$j"` 转传——JSON 里的转义序列会被 echo 吃掉导致连环误报（2026-08-31 三连误报实录）。TURN0_STUCK 告警在首轮工作中会误报，判卡死须同时满足 activity 为空。
 
+## 怎么判断作业是**真在跑**（2026-09-17 夜教训，必读）
+
+**这一节回答的不是"额度用完没有"，而是"这个作业到底有没有在推进"。额度耗尽只是众多停因中的一种。**
+
+**病史**：那晚派了 6 单，23:30 负责人问"你怎么确认 codex 还在干活"。主会话用了两种方法确认，**两种都是错的**，六单其实全停了近一小时：
+
+| 错误方法 | 当时的读数 | 为什么无效 |
+|---|---|---|
+| `tcd check <job> --json` 看 `state` / `elapsed_s` | `state: "working"`、`elapsed_s` 在增长 → 判"都在正常跑" | `state` 是**我方自产物**。它靠 pane 里有没有 `Working (` 之类字样判定；额度耗尽时这行字**消失了**，却没有任何一条规则接手回答"那它现在显示的是什么"，于是默认留在 working。`elapsed_s` 只是 now−started_at，作业死了它照样涨 |
+| `grep -i "rate limit\|quota\|429" ~/.tcd/jobs/*.log` | 无命中 → 判"日志里没有限流" | **日志文件本身早就停止写入了**，grep 到的只有历史内容。"搜不到"在这里恰恰是停了的证据，却被读成了健康 |
+
+两条的共性：**判据取自我方自产物（状态字段、关键词表），验的是我方自洽，不是世界的样子。**
+
+**两个有效判据（都是外部证据，优先用它们）**：
+
+```bash
+# ① 日志 mtime —— 文件系统说的话。那晚五单静默了 51–60 分钟
+python3 -c "import os,sys,time;p=os.path.expanduser('~/.tcd/jobs/%s.log'%sys.argv[1]);print(int(time.time()-os.stat(p).st_mtime),'s since last write')" <job_id>
+stat -f %m ~/.tcd/jobs/<job_id>.log     # macOS 原始写法
+
+# ② 抓屏 —— Codex 自己吐的字，不是我们推断的
+tmux -L tcd capture-pane -p -t tcd-codex-<job_id> | tail -25
+```
+
+**tcd ≥0.6.5 把这两条做进了 CLI**，优先用它，不要自己拼：
+
+```bash
+tcd check <job_id> --json | python3 -c "import json,sys;print(json.load(sys.stdin)['liveness'])"
+tcd status <job_id>            # 人读格式，直接打印 Liveness 行与末屏证据
+tcd check <job_id> --json --silence-seconds 1800   # 跑全量测试的包调大静默阈值
+```
+
+`liveness` 块 = **两问交叉**：① 动没动（`silence_s` 日志静默秒数、`silent`）；② 为什么不动（`pane_state` 末屏五类互斥状态）。
+`warnings` 里同步出 `BLOCKED` / `AWAITING_INPUT` / `NO_PROGRESS` / `UNKNOWN_PANE`。
+
+| `pane_state` | 含义 | 处置 |
+|---|---|---|
+| `working` | 有进行中的迹象 | 继续等；**但若同时 `silent`=true → 是停滞**，屏幕在骗你 |
+| `awaiting_input` | 等人按键（选择/确认框） | **报人，绝不替它按键**——见下 |
+| `blocked` | 明说干不下去（额度耗尽、鉴权失败、重试耗尽…），`recover_at` 是屏幕上的恢复时间 | 人去买额度或等 `recover_at`；催办没有用 |
+| `idle_prompt` | 回到空闲输入框 | **可能刚干完，也可能半途停了**——按交付物清单与 `[DONE:包名]` 判，不要据此下任一结论 |
+| `unknown` | 认不出来 | **必有的一类**。报"认不出"并附末屏原文（`pane_tail`）交人看，**绝不当成"在跑"**——那晚出事的根因正是认不出的状态被当成了在跑 |
+
+**为什么必须交叉、不能单看一边**：静默 + `idle_prompt` ≠ 挂了（可能刚交完活）；不静默 + `awaiting_input` 也可能是刚弹出来（`awaiting_input_fresh`，再看一轮）。静默多久算"静默"**与作业类型有关**：跑全量测试的包可以十几分钟不出声，只读分析包不该——所以它是参数（`--silence-seconds` / 监工 `--silence-minutes`，默认 20 分钟），派测试重的包记得调大。
+
+**两段屏幕原文特征**（都是 `tail -25` 就能看到的；文案会变，所以两处代码都把特征串集中成了常量表 `src/tcd/liveness.py` 与监工的 `tcd_watch.py`，加新特征往表里加）：
+
+```
+■ You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to
+purchase more credits or try again at Sep 19th, 2026 8:27 PM.
+```
+→ `blocked`，`recover_at="Sep 19th, 2026 8:27 PM"`。注意这屏下面**还有一个空闲输入框**，只看输入框会误判成"回合结束"。
+
+```
+  Approaching rate limits
+  Switch to gpt-5.6-luna for lower credit usage?
+› 1. Switch to gpt-5.6-luna                 Fast and affordable agentic coding model.
+  2. Keep current model
+  3. Keep current model (never show again)  Hide future rate limit reminders about switching models.
+  Press enter to confirm or esc to go back
+```
+→ `awaiting_input`（特征 = `Press enter to confirm` + `› 1.` 这样的高亮候选行）。**这种状态下作业永远不会自己恢复**，计时器再走也没用。
+
+> ⚠️ **不要替用户决定切换到更便宜的模型——那是花钱的决定，交给人。** 同日 22:0x 有一单页脚变成了 `gpt-5.6-luna medium`，而派单时从未指定过 luna：极可能就是在上面这个提示上被"自动补回车"误触切过去的，当时无人察觉，**那一单的代码是低配模型跑的**。所以：`awaiting_input` 一律只报警不按键（`tcd nudge` 的补回车只用于 Turn 0 投递未确认的情形，且 tcd 会自己判定）；监工同理。
+>
+> 更一般地：**认不出的屏幕、需要花钱或授权的选择，都不是自动化该收口的地方**。宁可报"认不出"停下来问人，也不要猜一个状态继续跑。
+
+### 特征串的纪律：显式声明优于模糊匹配（2026-09-18 现场教训）
+
+上面这套东西**上线第一天就自己误报了一次**，值得当成反面教材记住。
+
+监工对作业 `1a71d468` 返回 9（blocked），日志写「服务端返回限流/配额错误」，证据行是：
+
+```
+  … +429 lines (ctrl + t to view transcript)
+```
+
+而同一屏往下两行是 `• Working (1m 30s • esc to interrupt)`，`silence_s` 还是 0——**作业正在干活**。
+
+根因：特征表里有一条 `\b(?:429|...)\b`，它匹配的 `429` 是 **Codex TUI 折叠提示里的行数**，不是 HTTP 状态码。（顺带一提，同一个东西还骗过一次人工 `grep -c "429"`。）
+
+**这正是本节开头批评的那类错误的又一个实例**：判据取自一个**廉价的替身**（裸字符串 `429`），而不是真正的事实（HTTP 响应状态）。工具本身就是为纠正这类毛病做的，结果它自己的判据里有一条。
+
+由此定下三条纪律，加新特征时照做：
+
+1. **裸数字不能单独作为特征**。`429` / `500` 这类要么带上下文声明它是状态码（`status 429` / `HTTP 429` / `error: 429` / `429 Too Many Requests`），要么就别用。同理，`giving up`、`max retries`、`please log in`、`approve this` 这类**日常英语短语**裸用必撞——代理谈论自己的工作时就会写出这些字（"giving up on the regex approach"）。要锚到程序真正打印的形状（`giving up after \d+`、`max retries exceeded`），或者锚到本 CLI 独有的措辞（`codex login`）。
+2. **矛盾时不采信任何一边**。"停了"的特征与同屏的活标志（`Working (` / `esc to interrupt`）不可能同时为真。现在两处代码都会在这种情况下返回 `unknown` 并把**两行都**附上交人看，而不是挑一个更吓人的报出去。这是第二道防线——就算将来又混进一条便宜的特征串，它也变不成结论。
+3. **语料库当门**。两个仓库的测试里各有一份 `TUI_CHROME`：健康作业会画出来的行 + 代理干活时写下的话（含 `… +429 lines`、`+429 lines)`、`const RATE_LIMIT = 429;`、`> ` 空引用行等）。**任何特征表里的任何模式命中其中任何一行，测试就红**。加新特征前先往这份语料库里加一行反例，是比人眼审查可靠的做法——这次的 bug 本该在这里被拦下，而当初我只用眼睛扫了一遍表。
+
+> 这条门第一次跑就抓出 **5 条**弱特征（不止闯祸那一条），而复用自 `PROVIDER_ERROR_SIGNS` 的那批**零命中**——因为它们每一条都锚在字面短语上（`unexpected status`、`auth error:`、`Model metadata for`）。**显式声明优于模糊匹配**，这就是现成的对照组。
+
+**监工返回码**（`tcd_watch.py`，agent-owners 仓）：`8` 卡在需要按键的提示 / `9` 明确干不下去（观察日志里带 `recover_at`）/ `10` 屏幕认不出且已静默（带 `pane_tail` 原文）。这三种都**不是"慢"**，是"停了且不会自己恢复"，处置方式与停滞（`4`）完全不同——不要催办，交人。
+
 **停摆处置**（2026-09-09 更新：投递层已修，重派不再是首选）：
 - tcd ≥0.6.3 的 start/send 投递校验分三态（running/pasted/absent），且事件流必须出现 confirmed/unconfirmed 之一。`tcd start` 或 `tcd send` **退出码 3 = 投递未确认**，会话仍保留；输入框有滞留文字时先运行 `tcd nudge <id>`，不要直接操作 tmux send-keys
 - 仍然停摆时先分辨是哪一种：`tcd log <id> | grep prompt_` 看投递结论（confirmed/unconfirmed）；`tcd check --json` 看 activity 是否为空
@@ -305,6 +401,10 @@ tcd start -p codex -d <dir> --timeout 45 \
 
 
 ## 监工与派单模板附则（2026-09-09，来自修复包 3 / E0-A / E0-B 三单实战）
+
+**子代理回合不再误判为主回合完成（2026-09-15，tcd 仓 5a48ade）**
+- Codex 原生子代理（thread_spawn）完成时也会触发 notify；旧版 tcd 会 turn_count+1、写 .turn-complete、把子代理小结当 last_agent_message——09-14 两单根目录作业因此被误判 idle。现已按 thread-id 读 rollout 元数据分流：子代理只累加 `subagent_turns`；`detect_completion` 在信号文件存在时再抓 pane，命中 `Working (` / `esc to interrupt` / `Waiting for agents` 返回 inconclusive（`TCD_CODEX_PANE_VALIDATION=0` 可关）。`tcd status/check --json` 新增 `subagent_turns`、`pane_working`；原始通知追加在 `~/.tcd/jobs/<job>.notify.jsonl`。**完成判定规矩不变**：`tcd verify` 全过 + 交付物点名 + `[DONE:包名]`，`turn_state=idle` 不算。
+- 派到**仓库根目录**（非 tms-app）的文档/工具类作业也要有 AGENTS.md（TMS 已补根 AGENTS.md，明写「不要为等子代理而结束回合、子代理汇报不是交付」）。
 
 **tcd 投递与完成信号（≥0.6.3）**
 - `tcd status --json` 的 `delivery` 和 `last_event` 是投递判定入口；事件流没有 prompt/message confirmed/unconfirmed 之一，就视为校验未发生。

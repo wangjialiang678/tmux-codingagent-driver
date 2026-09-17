@@ -30,7 +30,9 @@ class CompletionResult:
 # like "rate limit" or "service unavailable" also appear when an agent is
 # *working on* retry logic or reading a log file, and a false PROVIDER_ERROR
 # telling the caller to kill a healthy job is worse than no warning at all.
-_PROVIDER_ERROR_SIGNS: tuple[tuple[re.Pattern[str], str], ...] = (
+# Public because `tcd.liveness` classifies the same envelopes as `blocked`
+# screens: one table, two consumers, so a new error shape is learned once.
+PROVIDER_ERROR_SIGNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(r'"type"\s*:\s*"invalid_request_error"'),
         "provider rejected the request (check --model / credentials)",
@@ -60,6 +62,9 @@ _PROVIDER_ERROR_SIGNS: tuple[tuple[re.Pattern[str], str], ...] = (
         "the configured model id is not recognised by the provider",
     ),
 )
+
+#: Backwards-compatible alias for the pre-0.6.5 private name.
+_PROVIDER_ERROR_SIGNS = PROVIDER_ERROR_SIGNS
 
 
 class Provider(ABC):
