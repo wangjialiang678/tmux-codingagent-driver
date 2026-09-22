@@ -170,7 +170,7 @@ def doctor(live: bool, provider: str | None, timeout: int, as_json: bool):
 @click.option("-m", "--prompt", required=True, help="Task prompt (use '-' for stdin).")
 @click.option("-d", "--cwd", default=".", help="Working directory.")
 @click.option("--model", default=None, help="Model name override.")
-@click.option("--timeout", default=60, type=int, help="Timeout in minutes.")
+@click.option("--timeout", default=60, type=int, help="Timeout in minutes (recorded on the job only; NOT enforced — nothing kills the job at this deadline).")
 @click.option("--sandbox", default=None, help="Sandbox mode (providers that support it; Codex only today).")
 @click.option("--worktree", is_flag=True, default=False, help="Run in a git worktree for isolation.")
 @click.option("--wt-name", default=None, help="Custom worktree branch name (default: job ID).")
@@ -820,9 +820,14 @@ def verify(job_id: str, as_json: bool):
 @click.argument("job_id")
 @click.option("--timeout", default=300, type=int, help="Max wait time in seconds.")
 def wait(job_id: str, timeout: int):
-    """Block until job completes.
+    """Block until the current turn completes — NOT until the whole job ends.
 
-    Exit codes: 0=completed, 1=failed, 2=timeout
+    Returns as soon as one turn goes idle. An agent that starts another turn
+    on its own (Codex routinely does) is still working when this returns 0, so
+    callers driving multi-turn agents must check the pane or an acceptance
+    contract rather than treating exit 0 as "the job is done".
+
+    Exit codes: 0=turn completed, 1=failed, 2=timeout
     """
     mgr = JobManager()
     job = mgr.load_job(job_id)
