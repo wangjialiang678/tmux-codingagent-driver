@@ -239,7 +239,7 @@ tcd clean
 - **沙箱模式**：默认 `workspace-write`（只能写工作目录）。需要写代码时，加 `--sandbox danger-full-access`
 - 如果用户要求"不要修改代码"，必须在提示词中明确告诉 Codex
 - 一个 job 可以通过 `tcd send` 发送多轮消息，实现对话式交互
-- 长任务请调大 `--timeout`
+- `--timeout` 只是记录值，不会终止作业（见下方「作业状态的真实语义」）；真正的超时要驱动方自己实现
 - tcd 也支持驱动 Claude Code (`-p claude`) 和 Gemini CLI (`-p gemini`)
 - 每个 job 自动产生 `.events.jsonl` 结构化事件日志，可通过 `tcd log` 查看
 - **Worktree 必须 commit**：使用 `--worktree` 时，AI 必须在完成后 commit 修改。未 commit 的改动在 `tcd merge` 时会被忽略（"Already up to date"），worktree 清理后代码直接丢失。这是最常见的 worktree 使用错误。
@@ -247,6 +247,23 @@ tcd clean
 - **已 commit 的分支在 kill 后仍保留**：即便 worktree 目录被删，`tcd/<job_id>` 分支与其 commit 仍在，可 `git merge tcd/<job_id>` 直接救回。所以"误判已丢失"前务必先 `git branch -a` / `git fsck` 查证。
 - **驱动 helper**：`scripts/tcd-await-commit.sh <worktree> <base>`（轮询分支新 commit，可靠完成信号）；`scripts/tcd-merge-safe.sh <repo> <worktree> <branch> <base>`（无 commit 则先从 worktree 代提交再 merge，绝不丢工）。
 - **自举警告**：如果任务目标是修改 tcd 自身（`~/projects/AI 工作流/tmux-codingagent-driver`），注意当前全局安装的 tcd 可能包含你正在修复的 bug。修复完成后建议先手动合并（`git merge`），再 `uv tool install . --force` 更新全局版本，最后再用 `tcd merge` 处理其他 worktree。
+
+### 作业状态的真实语义（2026-09-22 读源码 + 对照实验坐实）
+
+| 直觉 | 实际 |
+|---|---|
+| `tcd wait` 返回 0 = 作业做完了 | 只表示**一个 turn** 完成。Codex 常自行开启下一个 turn，此时它仍在改文件 |
+| `--timeout N` 到点会终止作业 | 只写进 Job 记录，代码里**无任何消费点**，不存在看门狗 |
+| `Status: running` = 还在干活 | 会话存活即 running。作业完工后 tmux 会话**故意保活**（末尾的 `read`）供 attach，需手工 `kill` + `clean`。`tcd jobs` 越积越多是这个原因，与 reconcile 无关 |
+| `tmux ls` 查不到会话 = 会话已死 | tcd 用独立 socket，默认 `tcd`。**必须** `tmux -L tcd ls \| grep <job_id>` |
+
+**完工判定**：交付物 + `tcd verify` 退出码 + pane 里有无 `Working (`。不要用 `tcd wait` 的退出码。
+
+**⚠️ 观测方法错误会伪装成 tcd 的 bug。** 本文件已有两个实例：09-18 用 `tail` 漏看 session，
+判成「astra 起不来」；09-22 用 `tmux ls` 查错 socket，判成「reconcile 失效」，据此派了 35 分钟
+工去修一个**不存在的 bug**（退回原代码的对照实验证明它本来就是对的）。断定 tcd 有 bug 前，
+先验证你的观测手段本身。**执行代理说「你的定位不成立」时必须当场做对照实验**——那次它说了
+两遍，复述完继续往下走等于没看见。测试全绿 + 契约通过只证「没改坏」，对「修错了对象」天生失明。
 
 ## 验收契约（2026-08-18 起为派工标准动作，tcd ≥0.6.0 内置）
 
@@ -267,7 +284,13 @@ tcd start -p codex -d <dir> --timeout 45 \
 
 **配套纪律**：
 - 目标项目放 AGENTS.md 执行代理契约（对端是自动化驱动、技能审批门槛视为预批、勿为等子代理结束回合）——superpowers 官方规定 AGENTS.md 优先级高于技能
-- **模型策略（王佳梁 2026-09-09 定）**：默认 `gpt-5.6-sol` + `model_reasoning_effort = "high"`（`~/.codex/config.toml` 全局值，tcd 不传 `--model` 时即用它）；`gpt-6-astra` 只用于架构讨论和重要复杂问题，按次 `tcd start --model gpt-6-astra`，不改全局。派单后看一眼 Codex 页脚的模型名核对（09-09 修复包 3/4 曾在不知情下跑了 astra medium）。"写一半停"不是模型缺陷，是指令污染
+- **模型策略（王佳梁 2026-09-09 定；2026-09-18 实测修正）**：主模型 `gpt-5.6-terra` + subagent `gpt-5.6-sol`，均 `model_reasoning_effort = "high"`（`~/.codex/config.toml` 全局值；tcd 不传 `--model` 时用**主模型 terra**，不是 sol——此前这行误写为 sol）。`gpt-6-astra`（= GPT-6）只用于架构讨论和重要复杂问题，按次 `tcd start --model gpt-6-astra`，不改全局。
+  ✅ **2026-09-18 复测：astra 完全可用**（`--model gpt-6-astra`，页脚确认 `gpt-6-astra high`，任务正常完成）。
+  当天上午曾有一次判定为"tcd 报 Job started 但 session 起不来"——**那是观测方法错误，不是 astra 的问题**：
+  用 `tmux -L tcd ls | tail -N` 看末尾几行会漏掉 session（列表**不按创建时间排**，按名字排）。
+  ⇒ **正确核查法**：`tmux -L tcd ls | grep <job_id>`，**永远用 grep，不要用 tail 数行**。
+  ⚠️ 无论用什么模型，派单后都该 grep 一次确认 session 存在——`Job started` 只代表 tcd 发出了启动请求，不代表 session 已建立。
+  派单后看一眼 Codex 页脚的模型名核对（09-09 修复包 3/4 曾在不知情下跑了 astra medium）。"写一半停"不是模型缺陷，是指令污染
 - 若无人值守场景仍频繁被 multi_agent 中场空闲干扰，可对该场景单独 `-c features.multi_agent=false`
 
 ## 运行面验证（2026-08-20 起为交付标准动作）
