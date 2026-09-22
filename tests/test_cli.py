@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -600,6 +601,46 @@ def test_jobs_reconciles_dead_sessions(runner, tmp_jobs, monkeypatch):
     reconciled = mgr.load_job(dead.id)
     assert reconciled.status == "completed"
     assert reconciled.completed_at is not None
+
+
+def test_jobs_reconciles_all_jobs_when_tmux_server_is_missing(runner, tmp_jobs, monkeypatch):
+    working = _create_test_job(tmp_jobs, status="running")
+    working.turn_state = "working"
+    idle = _create_test_job(tmp_jobs, status="running")
+    idle.turn_state = "idle"
+    mgr = JobManager()
+    mgr.save_job(working)
+    mgr.save_job(idle)
+
+    class MissingServerTmux:
+        def session_exists(self, _name):
+            raise subprocess.CalledProcessError(
+                1,
+                ["tmux", "list-sessions"],
+                stderr="no server running on /private/tmp/tmux-502/tcd",
+            )
+
+    monkeypatch.setattr("tcd.cli.TmuxAdapter", lambda: MissingServerTmux())
+
+    result = runner.invoke(cli, ["jobs"])
+    assert result.exit_code == 0
+
+    assert mgr.load_job(working.id).status == "failed"
+    assert mgr.load_job(idle.id).status == "completed"
+
+
+def test_jobs_skips_reconcile_on_indeterminate_tmux_error(runner, tmp_jobs, monkeypatch):
+    job = _create_test_job(tmp_jobs, status="running")
+
+    class PermissionDeniedTmux:
+        def session_exists(self, _name):
+            raise PermissionError("permission denied")
+
+    monkeypatch.setattr("tcd.cli.TmuxAdapter", lambda: PermissionDeniedTmux())
+
+    result = runner.invoke(cli, ["jobs"])
+    assert result.exit_code == 0
+    assert JobManager().load_job(job.id).status == "running"
 
 
 def test_jobs_no_reconcile_leaves_records_alone(runner, tmp_jobs, monkeypatch):

@@ -1314,6 +1314,27 @@ def _reconcile_jobs(mgr: JobManager) -> int:
                 if hasattr(tmux, "session_exists")
                 else job.tmux_session in tmux.list_sessions()
             )
+        except subprocess.CalledProcessError as exc:
+            # A missing tmux server is authoritative: every session on that
+            # socket is gone. Other command failures remain indeterminate.
+            output = "\n".join(
+                str(value)
+                for value in (getattr(exc, "stderr", None), getattr(exc, "output", None))
+                if value
+            ).lower()
+            server_missing = (
+                "no server running" in output
+                or (
+                    "error connecting to" in output
+                    and "no such file or directory" in output
+                )
+            )
+            if not server_missing:
+                logger.warning(
+                    "reconcile: could not check session for %s", job.id, exc_info=True
+                )
+                continue
+            session_exists = False
         except Exception:
             logger.warning("reconcile: could not check session for %s", job.id, exc_info=True)
             continue
