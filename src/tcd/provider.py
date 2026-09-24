@@ -57,10 +57,6 @@ PROVIDER_ERROR_SIGNS: tuple[tuple[re.Pattern[str], str], ...] = (
         re.compile(r"\bReconnecting\.\.\.\s*(\d+)/\1\b"),
         "the provider connection is exhausted (final reconnect attempt)",
     ),
-    (
-        re.compile(r"Model metadata for `[^`]+` not found"),
-        "the configured model id is not recognised by the provider",
-    ),
 )
 
 #: Backwards-compatible alias for the pre-0.6.5 private name.
@@ -105,6 +101,9 @@ class Provider(ABC):
     # Whether `--sandbox` means anything to this CLI. When False, tcd rejects
     # the flag instead of accepting it and silently dropping it.
     supports_sandbox: bool = False
+    # Whether named configuration profiles are supported. When False, tcd
+    # rejects the flag instead of accepting it and silently dropping it.
+    supports_profile: bool = False
 
     def detect_provider_error(self, pane: str) -> str | None:
         """Return a human-readable reason if the pane shows a fatal API error.

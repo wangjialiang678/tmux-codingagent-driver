@@ -121,6 +121,12 @@ def test_build_launch_command_with_model(provider, job):
     assert "gpt-5" in cmd
 
 
+def test_build_launch_command_with_profile(provider, job):
+    job.profile = "ds"
+    cmd = provider.build_launch_command(job)
+    assert "--profile ds" in cmd
+
+
 def test_build_launch_command_rejects_invalid_model(provider, job):
     job.model = 'gpt-5; rm -rf /'
     with pytest.raises(ValueError, match="Invalid model name"):

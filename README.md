@@ -60,6 +60,8 @@ pip install -e .
 ```bash
 # Start a Codex job
 tcd start -p codex -m "Fix the bug in main.py" -d /path/to/project
+# Use a named Codex config profile from ~/.codex/<name>.config.toml
+tcd start -p codex --profile ds -m "Run the task with the ds profile" -d /path/to/project
 # Exit 3 means the session was kept but prompt delivery was not confirmed.
 
 # Start with git worktree isolation (parallel-safe)
@@ -167,6 +169,7 @@ use the historical default tmux server.
 | `-m, --prompt` | Task prompt (use `-` for stdin) |
 | `-d, --cwd` | Working directory (default: `.`) |
 | `--model` | Model name override |
+| `--profile` | Codex config profile name (from `~/.codex/<name>.config.toml`) |
 | `--timeout` | Timeout in minutes (default: 60) |
 | `--sandbox` | Codex sandbox mode (default: `danger-full-access`) |
 | `--worktree` | Run in isolated git worktree |

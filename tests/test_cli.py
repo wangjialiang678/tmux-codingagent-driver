@@ -725,6 +725,18 @@ def test_start_rejects_sandbox_on_providers_that_ignore_it(runner, tmp_jobs):
     assert "does not support --sandbox" in result.output
 
 
+def test_start_rejects_profile_on_providers_that_ignore_it(runner, tmp_jobs, monkeypatch):
+    class FakeProvider:
+        supports_profile = False
+
+    monkeypatch.setattr("tcd.cli._get_tmux", lambda: object())
+    monkeypatch.setattr("tcd.cli.get_provider", lambda provider: FakeProvider())
+
+    result = runner.invoke(cli, ["start", "-p", "claude", "-m", "hi", "--profile", "ds"])
+    assert result.exit_code == 1
+    assert "provider 'claude' does not support --profile" in result.output
+
+
 def test_start_provider_choices_come_from_the_registry(runner):
     from tcd.provider import list_providers
 
@@ -875,6 +887,7 @@ def test_clean_keeps_jobs_whose_tmux_session_is_still_alive(runner, tmp_jobs, mo
 
 def test_start_json_emits_machine_readable_job(runner, tmp_jobs, monkeypatch):
     class FakeProvider:
+        supports_profile = True
         tui_ready_indicator = "READY"
         working_markers = ("esc to interrupt",)
         def check_cli(self): return None
@@ -894,10 +907,11 @@ def test_start_json_emits_machine_readable_job(runner, tmp_jobs, monkeypatch):
     monkeypatch.setattr("tcd.cli.get_provider", lambda provider: FakeProvider())
     monkeypatch.setattr("tcd.cli.time.sleep", lambda _s: None)
 
-    result = runner.invoke(cli, ["start", "-p", "codex", "-m", "hi", "-d", "/tmp", "--json"])
+    result = runner.invoke(cli, ["start", "-p", "codex", "-m", "hi", "-d", "/tmp", "--profile", "ds", "--json"])
     assert result.exit_code == 0
 
     payload = json.loads(result.output)
     assert payload["job_id"] == JobManager().list_jobs()[0].id
     assert payload["tmux_session"].startswith("tcd-codex-")
+    assert payload["profile"] == "ds"
     assert payload["delivery"] == "confirmed"

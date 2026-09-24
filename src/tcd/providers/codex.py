@@ -210,6 +210,7 @@ class CodexProvider(Provider):
     verify_prompt_delivery = True
     # `codex -s <mode>` is real; see build_launch_command.
     supports_sandbox = True
+    supports_profile = True
 
     @staticmethod
     def pane_validation_enabled() -> bool:
@@ -303,6 +304,12 @@ class CodexProvider(Provider):
                 raise ValueError(f"Invalid model name: {job.model!r}")
             model_cfg = f"model={json.dumps(job.model)}"
             parts.append(f"-c {shlex.quote(model_cfg)}")
+
+        # named config profile
+        if job.profile is not None:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", job.profile):
+                raise ValueError(f"Invalid profile name: {job.profile!r}")
+            parts.append(f"--profile {shlex.quote(job.profile)}")
 
         inner_cmd = " ".join(parts)
 

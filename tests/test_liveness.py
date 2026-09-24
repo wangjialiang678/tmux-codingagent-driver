@@ -185,6 +185,8 @@ TUI_CHROME = [
     "const RATE_LIMIT = 429;",
     'test("handles 429", ...)',
     "approve this PR before merging",
+    "⚠ Model metadata for `gpt-6-sol` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.",
+    "warning: Model metadata for `deepseek-v4.1-flash` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.",
 ]
 
 STOP_TABLES = (

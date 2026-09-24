@@ -170,6 +170,7 @@ def doctor(live: bool, provider: str | None, timeout: int, as_json: bool):
 @click.option("-m", "--prompt", required=True, help="Task prompt (use '-' for stdin).")
 @click.option("-d", "--cwd", default=".", help="Working directory.")
 @click.option("--model", default=None, help="Model name override.")
+@click.option("--profile", default=None, help="Codex configuration profile name.")
 @click.option("--timeout", default=60, type=int, help="Timeout in minutes (recorded on the job only; NOT enforced — nothing kills the job at this deadline).")
 @click.option("--sandbox", default=None, help="Sandbox mode (providers that support it; Codex only today).")
 @click.option("--worktree", is_flag=True, default=False, help="Run in a git worktree for isolation.")
@@ -186,6 +187,7 @@ def start(
     prompt: str,
     cwd: str,
     model: str | None,
+    profile: str | None,
     timeout: int,
     sandbox: str | None,
     worktree: bool,
@@ -232,6 +234,14 @@ def start(
         )
         sys.exit(1)
 
+    if profile is not None and not getattr(prov, "supports_profile", False):
+        click.echo(
+            f"Error: provider {provider!r} does not support --profile; "
+            "it would be ignored. Remove the flag or use Codex.",
+            err=True,
+        )
+        sys.exit(1)
+
     # Check AI CLI is installed
     if hasattr(prov, "check_cli"):
         try:
@@ -251,7 +261,7 @@ def start(
     mgr = JobManager()
     job = mgr.create_job(
         provider, prompt, cwd,
-        model=model, timeout_minutes=timeout, sandbox=sandbox,
+        model=model, profile=profile, timeout_minutes=timeout, sandbox=sandbox,
         acceptance_files=list(require_files),
         acceptance_commands=list(require_cmds),
         acceptance_require_commit=require_commit,
@@ -317,7 +327,7 @@ def start(
         emit(job.id, "job.worktree_created", worktree_path=cwd, branch=f"tcd/{name}")
 
     try:
-        emit(job.id, "job.created", provider=provider, sandbox=sandbox, cwd=cwd, model=model)
+        emit(job.id, "job.created", provider=provider, sandbox=sandbox, cwd=cwd, model=model, profile=profile)
 
         # Build and launch
         launch_cmd = prov.build_launch_command(job)
@@ -381,6 +391,7 @@ def start(
                 "job_id": job.id,
                 "provider": provider,
                 "cwd": job.cwd,
+                "profile": job.profile,
                 "tmux_session": job.tmux_session,
                 "sandbox": job.sandbox,
                 "worktree_path": job.worktree_path,
@@ -398,6 +409,8 @@ def start(
                     f"or tcd nudge {job.id})"
                 )
             click.echo(f"Provider: {provider}")
+            if job.profile:
+                click.echo(f"Profile: {job.profile}")
             if job.sandbox:
                 click.echo(f"Sandbox: {job.sandbox}")
             click.echo(f"tmux session: {job.tmux_session}")
@@ -484,6 +497,8 @@ def status(job_id: str, as_json: bool):
     else:
         click.echo(f"ID:       {job.id}")
         click.echo(f"Provider: {job.provider}")
+        if job.profile:
+            click.echo(f"Profile:  {job.profile}")
         click.echo(f"Socket:   {job.tmux_socket if job.tmux_socket is not None else _get_job_tmux(job).socket or 'default'}")
         click.echo(f"Status:   {job.status}")
         click.echo(f"Delivery: {delivery}")
@@ -733,6 +748,7 @@ def check(job_id: str, as_json: bool, silence_seconds: int):
             )
         payload = {
             "state": state,
+            "profile": job.profile,
             "elapsed_s": _elapsed(job),
             "turn_count": job.turn_count,
             "subagent_turns": job.subagent_turns,

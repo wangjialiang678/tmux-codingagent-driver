@@ -91,7 +91,7 @@ class TestJobDataclass:
 
 class TestJobManager:
     def test_create_and_load(self, manager: JobManager):
-        job = manager.create_job("codex", "test prompt", "/tmp")
+        job = manager.create_job("codex", "test prompt", "/tmp", profile="ds")
         assert len(job.id) == 8
         assert job.provider == "codex"
         assert job.status == "pending"
@@ -101,6 +101,7 @@ class TestJobManager:
         assert loaded is not None
         assert loaded.id == job.id
         assert loaded.prompt == "test prompt"
+        assert loaded.profile == "ds"
 
     def test_load_nonexistent(self, manager: JobManager):
         assert manager.load_job("nonexistent") is None

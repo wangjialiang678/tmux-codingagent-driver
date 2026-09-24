@@ -45,6 +45,7 @@ class Job:
     # None means a pre-socket record and triggers tcd→default lookup fallback.
     tmux_socket: str | None = None
     model: str | None = None
+    profile: str | None = None
     created_at: str = field(default_factory=_now_iso)
     started_at: str | None = None
     completed_at: str | None = None
@@ -109,6 +110,7 @@ class JobManager:
         cwd: str,
         *,
         model: str | None = None,
+        profile: str | None = None,
         timeout_minutes: int = 60,
         sandbox: str | None = None,
         acceptance_files: list[str] | None = None,
@@ -126,6 +128,7 @@ class JobManager:
             tmux_session=tmux_session,
             tmux_socket=tmux_socket() or "",
             model=model,
+            profile=profile,
             timeout_minutes=timeout_minutes,
             sandbox=sandbox,
             acceptance_files=list(acceptance_files or []),
