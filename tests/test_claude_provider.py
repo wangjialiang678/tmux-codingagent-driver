@@ -44,7 +44,29 @@ def test_build_launch_command(job: Job):
 def test_build_launch_command_with_model(job: Job):
     job.model = "claude-sonnet-4-5-20250514"
     cmd = ClaudeProvider().build_launch_command(job)
-    assert "-m claude-sonnet-4-5-20250514" in cmd
+    assert "--model claude-sonnet-4-5-20250514" in cmd
+
+
+def test_build_launch_command_with_effort(job: Job):
+    job.effort = "high"
+    cmd = ClaudeProvider().build_launch_command(job)
+    assert "--effort high" in cmd
+
+
+def test_build_launch_command_normalises_effort_case(job: Job):
+    job.effort = "  XHigh "
+    cmd = ClaudeProvider().build_launch_command(job)
+    assert "--effort xhigh" in cmd
+
+
+def test_build_launch_command_rejects_invalid_effort(job: Job):
+    job.effort = "ultra"
+    with pytest.raises(ValueError, match="Invalid effort level"):
+        ClaudeProvider().build_launch_command(job)
+
+
+def test_build_launch_command_omits_effort_when_unset(job: Job):
+    assert "--effort" not in ClaudeProvider().build_launch_command(job)
 
 
 def test_build_launch_command_rejects_invalid_model(job: Job):

@@ -104,6 +104,11 @@ class Provider(ABC):
     # Whether named configuration profiles are supported. When False, tcd
     # rejects the flag instead of accepting it and silently dropping it.
     supports_profile: bool = False
+    # Whether per-job reasoning effort can be set on the command line. When
+    # False, tcd rejects the flag instead of accepting it and silently
+    # dropping it (providers whose effort is a global config value — Codex
+    # reads `model_reasoning_effort` from config.toml — must say so here).
+    supports_effort: bool = False
 
     def detect_provider_error(self, pane: str) -> str | None:
         """Return a human-readable reason if the pane shows a fatal API error.

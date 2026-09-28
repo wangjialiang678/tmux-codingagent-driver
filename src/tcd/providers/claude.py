@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 IDLE_THRESHOLD = 20.0  # seconds
 MODEL_RE = re.compile(r"^[a-zA-Z0-9._:/-]+$")
+# Claude Code's own `--effort` choices. Rejecting anything else is deliberate:
+# an unvalidated value would be forwarded verbatim and abort startup with
+# "error: option '--effort <level>' argument is invalid".
+EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
 QUEUED_MESSAGE_RE = re.compile(r"press\s+up\s+to\s+edit\s+queued\s+messages?", re.IGNORECASE)
 _NON_ASCII_ALNUM_RE = re.compile(r"[^A-Za-z0-9]")
 
@@ -63,6 +67,9 @@ class ClaudeProvider(Provider):
     name = "claude"
     cli_command = "claude"
     tui_ready_indicator = "❯"
+    # Claude Code takes `--effort <level>` per session, overriding the
+    # modelSettings.<model>.effortLevel value in ~/.claude/settings.json.
+    supports_effort = True
 
     def check_cli(self) -> None:
         if shutil.which(self.cli_command) is None:
@@ -80,7 +87,21 @@ class ClaudeProvider(Provider):
         if job.model:
             if not MODEL_RE.fullmatch(job.model):
                 raise ValueError(f"Invalid model name: {job.model!r}")
-            parts.extend(["-m", shlex.quote(job.model)])
+            # Claude Code CLI has no short `-m` flag: passing it aborts startup
+            # with "error: unknown option '-m'" and the TUI never becomes ready.
+            parts.extend(["--model", shlex.quote(job.model)])
+
+        if job.effort:
+            # Per-job effort overrides the modelSettings effortLevel in
+            # settings.json, so an xhigh default does not force every job to
+            # pay for xhigh reasoning.
+            level = job.effort.strip().lower()
+            if level not in EFFORT_LEVELS:
+                raise ValueError(
+                    f"Invalid effort level: {job.effort!r}; "
+                    f"expected one of {', '.join(sorted(EFFORT_LEVELS))}"
+                )
+            parts.extend(["--effort", level])
 
         inner_cmd = " ".join(parts)
         script_cmd = TmuxAdapter.build_script_command(log_file, inner_cmd)

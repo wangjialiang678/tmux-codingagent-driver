@@ -46,6 +46,9 @@ class Job:
     tmux_socket: str | None = None
     model: str | None = None
     profile: str | None = None
+    # Per-job reasoning effort (Claude Code: low/medium/high/xhigh/max).
+    # None means "whatever the CLI's own settings file says".
+    effort: str | None = None
     created_at: str = field(default_factory=_now_iso)
     started_at: str | None = None
     completed_at: str | None = None
@@ -111,6 +114,7 @@ class JobManager:
         *,
         model: str | None = None,
         profile: str | None = None,
+        effort: str | None = None,
         timeout_minutes: int = 60,
         sandbox: str | None = None,
         acceptance_files: list[str] | None = None,
@@ -129,6 +133,7 @@ class JobManager:
             tmux_socket=tmux_socket() or "",
             model=model,
             profile=profile,
+            effort=effort,
             timeout_minutes=timeout_minutes,
             sandbox=sandbox,
             acceptance_files=list(acceptance_files or []),

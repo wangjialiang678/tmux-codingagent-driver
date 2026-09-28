@@ -170,6 +170,8 @@ def doctor(live: bool, provider: str | None, timeout: int, as_json: bool):
 @click.option("-m", "--prompt", required=True, help="Task prompt (use '-' for stdin).")
 @click.option("-d", "--cwd", default=".", help="Working directory.")
 @click.option("--model", default=None, help="Model name override.")
+@click.option("--effort", default=None, type=click.Choice(["low", "medium", "high", "xhigh", "max"]),
+              help="Reasoning effort for this job (Claude Code only). Overrides the modelSettings effortLevel in settings.json for this session.")
 @click.option("--profile", default=None, help="Codex configuration profile name.")
 @click.option("--timeout", default=60, type=int, help="Timeout in minutes (recorded on the job only; NOT enforced — nothing kills the job at this deadline).")
 @click.option("--sandbox", default=None, help="Sandbox mode (providers that support it; Codex only today).")
@@ -187,6 +189,7 @@ def start(
     prompt: str,
     cwd: str,
     model: str | None,
+    effort: str | None,
     profile: str | None,
     timeout: int,
     sandbox: str | None,
@@ -242,6 +245,15 @@ def start(
         )
         sys.exit(1)
 
+    if effort is not None and not getattr(prov, "supports_effort", False):
+        click.echo(
+            f"Error: provider {provider!r} does not support --effort; "
+            "its reasoning effort is a global config value, not a per-job flag. "
+            "Remove the flag or use Claude.",
+            err=True,
+        )
+        sys.exit(1)
+
     # Check AI CLI is installed
     if hasattr(prov, "check_cli"):
         try:
@@ -261,7 +273,8 @@ def start(
     mgr = JobManager()
     job = mgr.create_job(
         provider, prompt, cwd,
-        model=model, profile=profile, timeout_minutes=timeout, sandbox=sandbox,
+        model=model, profile=profile, effort=effort,
+        timeout_minutes=timeout, sandbox=sandbox,
         acceptance_files=list(require_files),
         acceptance_commands=list(require_cmds),
         acceptance_require_commit=require_commit,
@@ -327,7 +340,7 @@ def start(
         emit(job.id, "job.worktree_created", worktree_path=cwd, branch=f"tcd/{name}")
 
     try:
-        emit(job.id, "job.created", provider=provider, sandbox=sandbox, cwd=cwd, model=model, profile=profile)
+        emit(job.id, "job.created", provider=provider, sandbox=sandbox, cwd=cwd, model=model, profile=profile, effort=effort)
 
         # Build and launch
         launch_cmd = prov.build_launch_command(job)
