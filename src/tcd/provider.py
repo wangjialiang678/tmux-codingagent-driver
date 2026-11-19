@@ -71,6 +71,10 @@ class Provider(ABC):
     # Substring to detect when the TUI is ready to accept input.
     # Override in subclasses. None means just use a fixed delay.
     tui_ready_indicator: str | None = None
+    # Separate marker for the editable prompt row during delivery checks.
+    # Defaults to the ready marker, but providers whose ready marker is a
+    # footer can set this to an empty string to disable composer inference.
+    delivery_composer_indicator: str | None = None
     # Placeholder rendered in an otherwise empty composer. Delivery checks
     # ignore it when deciding whether user text is visibly stuck.
     composer_placeholder: str | tuple[str, ...] | None = None
@@ -87,6 +91,12 @@ class Provider(ABC):
     # resend if it was dropped. Verification is provider-agnostic (it looks for
     # the prompt echoed back), so it is on by default for the same reason.
     verify_prompt_delivery: bool = True
+    # Bounded recovery policy for delivery verification. A provider whose TUI
+    # can accept a prompt without exposing an immediate echo should disable
+    # retries rather than risk executing a request more than once.
+    prompt_delivery_retries: int = 2
+    message_delivery_retries: int = 1
+    delivery_enter_retries: int = 3
     # Pane substrings proving a turn is running. Used as the second, more
     # durable half of delivery verification: the echoed prompt scrolls away,
     # this does not. Getting it wrong is worse than having no verification —
@@ -104,6 +114,10 @@ class Provider(ABC):
     # Whether named configuration profiles are supported. When False, tcd
     # rejects the flag instead of accepting it and silently dropping it.
     supports_profile: bool = False
+    # Whether `tcd start` must stop before prompt delivery when the provider's
+    # TUI ready signal was not observed. Useful for providers whose prompt
+    # destination is not otherwise safe to infer from an unknown screen.
+    require_tui_ready: bool = False
     # Whether per-job reasoning effort can be set on the command line. When
     # False, tcd rejects the flag instead of accepting it and silently
     # dropping it (providers whose effort is a global config value — Codex

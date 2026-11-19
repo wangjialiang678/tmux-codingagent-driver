@@ -44,7 +44,13 @@ class TmuxNotFoundError(TmuxError):
 
 
 
-def _run(args: list[str], *, check: bool = True, timeout: int = SUBPROCESS_TIMEOUT) -> subprocess.CompletedProcess[str]:
+def _run(
+    args: list[str],
+    *,
+    check: bool = True,
+    timeout: int = SUBPROCESS_TIMEOUT,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     """Run a subprocess with timeout and capture output."""
     logger.debug("Running: %s", " ".join(args))
     return subprocess.run(
@@ -53,6 +59,7 @@ def _run(args: list[str], *, check: bool = True, timeout: int = SUBPROCESS_TIMEO
         text=True,
         timeout=timeout,
         check=check,
+        env=env,
     )
 
 
@@ -98,7 +105,14 @@ class TmuxAdapter:
         """tmux executable plus the selected server argument."""
         return [self.tmux, *( ["-L", self.socket] if self.socket else [])]
 
-    def create_session(self, name: str, cmd: str, cwd: str) -> bool:
+    def create_session(
+        self,
+        name: str,
+        cmd: str,
+        cwd: str,
+        *,
+        env: dict[str, str] | None = None,
+    ) -> bool:
         """Create a detached tmux session running *cmd* in *cwd*.
 
         Returns True on success, False on failure.
@@ -110,7 +124,7 @@ class TmuxAdapter:
                 "-s", name,       # session name
                 "-c", cwd,        # working directory
                 cmd,              # shell command
-            ])
+            ], env=env)
             logger.info("Created tmux session: %s", name)
             return True
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:

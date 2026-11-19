@@ -385,6 +385,10 @@ def _run_live_check(report: DoctorReport, tmux: TmuxAdapter, prov: Any, timeout:
     job_id = f"doctor-{uuid.uuid4().hex}"
     session = f"tcd-doctor-{name}-{uuid.uuid4().hex[:8]}"
     job = Job(job_id, name, "pending", PROBE_PROMPT, str(temp_dir), session)
+    session_tmux = tmux
+    if name == "agy":
+        session_tmux = TmuxAdapter(socket=f"tcd-doctor-agy-{uuid.uuid4().hex[:8]}")
+        job.tmux_socket = session_tmux.socket or ""
     deadline = time.monotonic() + timeout
     created = False
     logger.info("doctor: starting live probe provider=%s session=%s timeout=%ss", name, session, timeout)
@@ -392,13 +396,24 @@ def _run_live_check(report: DoctorReport, tmux: TmuxAdapter, prov: Any, timeout:
     try:
         JOBS_DIR.mkdir(parents=True, exist_ok=True)
         command = prov.build_launch_command(job)
-        if not tmux.create_session(session, command, str(temp_dir)):
+        server_env_builder = getattr(prov, "tmux_server_environment", None)
+        server_env = server_env_builder() if callable(server_env_builder) else None
+        if server_env is None:
+            session_created = session_tmux.create_session(session, command, str(temp_dir))
+        else:
+            session_created = session_tmux.create_session(
+                session,
+                command,
+                str(temp_dir),
+                env=server_env,
+            )
+        if not session_created:
             report.add("LIVE_LAUNCH_FAILED", "error", f"Could not start a live {name} tmux session.", provider=name)
             return
         created = True
 
         ready, elapsed_ms, _ = wait_for_tui(
-            tmux,
+            session_tmux,
             session,
             prov,
             timeout_secs=_remaining_seconds(deadline),
@@ -415,7 +430,11 @@ def _run_live_check(report: DoctorReport, tmux: TmuxAdapter, prov: Any, timeout:
             return
 
         report.add("LIVE_READINESS", "pass", f"{name} showed its ready indicator in {elapsed_ms}ms.", provider=name, elapsed_ms=elapsed_ms)
-        if not tmux.send_text(session, PROBE_PROMPT):
+        req_id = f"{job.id}-{job.turn_count}-{int(time.time())}"
+        probe_prompt = PROBE_PROMPT
+        if name == "agy":
+            probe_prompt = prov.build_prompt_wrapper(PROBE_PROMPT, req_id)
+        if not session_tmux.send_text(session, probe_prompt):
             report.add(
                 "DELIVERY_DRIFT",
                 "error",
@@ -424,16 +443,26 @@ def _run_live_check(report: DoctorReport, tmux: TmuxAdapter, prov: Any, timeout:
             )
             return
 
+        completion_checker = getattr(prov, "delivery_completion_check", None)
+        composer_indicator = getattr(prov, "delivery_composer_indicator", None)
+        if composer_indicator is None:
+            composer_indicator = getattr(prov, "tui_ready_indicator", None)
         delivered = verify_prompt_delivery(
-            tmux,
+            session_tmux,
             session,
             job_id,
-            PROBE_PROMPT,
+            probe_prompt,
             retries=0,
+            enter_retries=getattr(prov, "delivery_enter_retries", 3),
             markers=getattr(prov, "working_markers", WORKING_MARKERS),
-            tui_ready_indicator=getattr(prov, "tui_ready_indicator", None),
+            tui_ready_indicator=composer_indicator,
             composer_placeholder=getattr(prov, "composer_placeholder", None),
             timeout_secs=_remaining_seconds(deadline),
+            completion_check=(
+                (lambda: completion_checker(session_tmux, job, req_id))
+                if name == "agy" and callable(completion_checker)
+                else None
+            ),
         )
         if not delivered:
             report.add(
@@ -451,7 +480,7 @@ def _run_live_check(report: DoctorReport, tmux: TmuxAdapter, prov: Any, timeout:
         report.add("LIVE_CHECK_FAILED", "error", f"Live check for {name} failed: {exc}", provider=name)
     finally:
         try:
-            killed = tmux.kill_session(session)
+            killed = session_tmux.kill_session(session)
             if created and not killed:
                 report.add("LIVE_CLEANUP_FAILED", "error", f"Could not kill live tmux session {session}.", provider=name)
         except Exception as exc:

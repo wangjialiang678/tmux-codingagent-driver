@@ -41,7 +41,7 @@ from tcd.tmux_adapter import TmuxAdapter, TmuxNotFoundError
 
 logger = logging.getLogger(__name__)
 
-_MARKER_PROVIDERS = {"claude", "gemini"}
+_MARKER_PROVIDERS = {"agy", "claude", "gemini"}
 _RUNNING_IDLE_NOTE = (
     "Note: this turn is complete, but the tmux session is still running for follow-ups. "
     "For marker providers, idle can come from TCD_DONE or idle fallback; use `tcd output --full` "
@@ -171,7 +171,7 @@ def doctor(live: bool, provider: str | None, timeout: int, as_json: bool):
 @click.option("-d", "--cwd", default=".", help="Working directory.")
 @click.option("--model", default=None, help="Model name override.")
 @click.option("--effort", default=None, type=click.Choice(["low", "medium", "high", "xhigh", "max"]),
-              help="Reasoning effort for this job (Claude Code only). Overrides the modelSettings effortLevel in settings.json for this session.")
+              help="Reasoning effort for this job (Claude Code or agy). Overrides the CLI setting for this session.")
 @click.option("--profile", default=None, help="Codex configuration profile name.")
 @click.option("--timeout", default=60, type=int, help="Timeout in minutes (recorded on the job only; NOT enforced — nothing kills the job at this deadline).")
 @click.option("--sandbox", default=None, help="Sandbox mode (providers that support it; Codex only today).")
@@ -249,7 +249,7 @@ def start(
         click.echo(
             f"Error: provider {provider!r} does not support --effort; "
             "its reasoning effort is a global config value, not a per-job flag. "
-            "Remove the flag or use Claude.",
+            "Remove the flag or use Claude Code or agy.",
             err=True,
         )
         sys.exit(1)
@@ -279,6 +279,10 @@ def start(
         acceptance_commands=list(require_cmds),
         acceptance_require_commit=require_commit,
     )
+    if provider == "agy" and job.tmux_socket != (tmux_socket() or ""):
+        # Every agy task owns a private tmux server so its session-only auth
+        # and proxy environment cannot affect other provider sessions.
+        tmux = TmuxAdapter(socket=job.tmux_socket or None)
 
     if require_commit:
         # Record HEAD now so acceptance can ask "did the agent commit anything"
@@ -340,11 +344,22 @@ def start(
         emit(job.id, "job.worktree_created", worktree_path=cwd, branch=f"tcd/{name}")
 
     try:
-        emit(job.id, "job.created", provider=provider, sandbox=sandbox, cwd=cwd, model=model, profile=profile, effort=effort)
+        emit(job.id, "job.created", provider=provider, sandbox=sandbox, cwd=cwd, model=job.model, profile=profile, effort=effort)
 
         # Build and launch
         launch_cmd = prov.build_launch_command(job)
-        if not tmux.create_session(job.tmux_session, launch_cmd, cwd):
+        server_env_builder = getattr(prov, "tmux_server_environment", None)
+        server_env = server_env_builder() if callable(server_env_builder) else None
+        if server_env is None:
+            session_created = tmux.create_session(job.tmux_session, launch_cmd, cwd)
+        else:
+            session_created = tmux.create_session(
+                job.tmux_session,
+                launch_cmd,
+                cwd,
+                env=server_env,
+            )
+        if not session_created:
             job.status = "failed"
             job.error = "tmux session creation failed"
             mgr.save_job(job)
@@ -366,6 +381,11 @@ def start(
         else:
             logger.warning("start %s: TUI not ready after %dms, proceeding anyway (trust_handled=%s)", job.id, elapsed_ms, trust_handled)
             emit(job.id, "job.tui_timeout", elapsed_ms=elapsed_ms, trust_handled=trust_handled)
+            if getattr(prov, "require_tui_ready", False):
+                raise RuntimeError(
+                    f"{provider} TUI readiness was not confirmed; prompt was not sent. "
+                    "Check the agy UI and provide its exact ready-screen text so TCD can be calibrated safely."
+                )
 
         # Inject prompt
         req_id = f"{job.id}-0-{int(time.time())}"
@@ -385,14 +405,25 @@ def start(
         # injected while a slow TUI was still initializing).
         delivery_confirmed = False
         if getattr(prov, "verify_prompt_delivery", True):
+            completion_checker = getattr(prov, "delivery_completion_check", None)
+            composer_indicator = getattr(prov, "delivery_composer_indicator", None)
+            if composer_indicator is None:
+                composer_indicator = getattr(prov, "tui_ready_indicator", None)
             delivery_confirmed = verify_prompt_delivery(
                 tmux,
                 job.tmux_session,
                 job.id,
                 wrapped,
+                retries=getattr(prov, "prompt_delivery_retries", 2),
+                enter_retries=getattr(prov, "delivery_enter_retries", 3),
                 markers=getattr(prov, "working_markers", WORKING_MARKERS),
-                tui_ready_indicator=getattr(prov, "tui_ready_indicator", None),
+                tui_ready_indicator=composer_indicator,
                 composer_placeholder=getattr(prov, "composer_placeholder", None),
+                completion_check=(
+                    (lambda: completion_checker(tmux, job, req_id))
+                    if callable(completion_checker)
+                    else None
+                ),
             )
         job.delivery = "confirmed" if delivery_confirmed else "unconfirmed"
         mgr.save_job(job)
@@ -404,6 +435,7 @@ def start(
                 "job_id": job.id,
                 "provider": provider,
                 "cwd": job.cwd,
+                "model": job.model,
                 "profile": job.profile,
                 "tmux_session": job.tmux_session,
                 "sandbox": job.sandbox,
@@ -422,6 +454,8 @@ def start(
                     f"or tcd nudge {job.id})"
                 )
             click.echo(f"Provider: {provider}")
+            if job.model:
+                click.echo(f"Model: {job.model}")
             if job.profile:
                 click.echo(f"Profile: {job.profile}")
             if job.sandbox:
@@ -975,16 +1009,27 @@ def send(job_id: str, message: str | None, file_path: str | None, as_json: bool)
     mgr.save_job(job)
     retry_queued_message_submission(tmux, job, prov, req_id)
 
+    completion_checker = getattr(prov, "delivery_completion_check", None)
+    composer_indicator = getattr(prov, "delivery_composer_indicator", None)
+    if composer_indicator is None:
+        composer_indicator = getattr(prov, "tui_ready_indicator", None)
     delivery_confirmed = verify_message_delivery(
         tmux,
         job.tmux_session,
         job.id,
         wrapped,
+        max_resends=getattr(prov, "message_delivery_retries", 1),
+        enter_retries=getattr(prov, "delivery_enter_retries", 3),
         markers=getattr(prov, "working_markers", WORKING_MARKERS),
-        tui_ready_indicator=getattr(prov, "tui_ready_indicator", None),
+        tui_ready_indicator=composer_indicator,
         composer_placeholder=getattr(prov, "composer_placeholder", None),
         req_id=req_id,
         turn=job.turn_count,
+        completion_check=(
+            (lambda: completion_checker(tmux, job, req_id))
+            if callable(completion_checker)
+            else None
+        ),
     )
 
     # Update job
@@ -1609,6 +1654,7 @@ _CHROME_PREFIXES: dict[str, tuple[str, ...]] = {
     "codex": ("›", "gpt-", "─"),
     "claude": ("❯", ">", "claude-", "─"),
     "gemini": ("›", ">", "gemini-", "─"),
+    "agy": ("›", "❯", ">", "gemini-", "─"),
 }
 _DEFAULT_CHROME_PREFIXES = ("›", "❯", ">", "─")
 

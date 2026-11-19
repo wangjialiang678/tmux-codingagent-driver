@@ -48,6 +48,13 @@ class ResponseCollector:
             result = self._try_log_file(job)
         if result is not None:
             result = clean_output(result)
+            try:
+                provider = get_provider(job.provider)
+                sanitizer = getattr(provider, "sanitize_full_output", None)
+                if callable(sanitizer):
+                    result = sanitizer(job, result)
+            except Exception as exc:
+                logger.debug("Provider full-output sanitization failed for job %s: %s", job.id, exc)
         return result
 
     def collect_raw(self, job: Job) -> str | None:

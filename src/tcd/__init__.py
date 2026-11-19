@@ -6,3 +6,4 @@ __version__ = "0.6.4"
 import tcd.providers.codex  # noqa: F401
 import tcd.providers.claude  # noqa: F401
 import tcd.providers.gemini  # noqa: F401
+import tcd.providers.agy  # noqa: F401

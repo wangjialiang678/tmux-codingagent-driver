@@ -112,6 +112,7 @@ class JobManager:
         prompt: str,
         cwd: str,
         *,
+        tmux_socket: str | None = None,
         model: str | None = None,
         profile: str | None = None,
         effort: str | None = None,
@@ -123,6 +124,17 @@ class JobManager:
     ) -> Job:
         job_id = _generate_id()
         tmux_session = f"tcd-{provider}-{job_id}"
+        if tmux_socket is None:
+            # Antigravity jobs get a private server so their auth and proxy
+            # environment remain scoped to that provider session.
+            if provider == "agy":
+                socket = f"tcd-agy-{job_id}"
+            else:
+                # Keep the module-level config function patchable for existing
+                # callers/tests, even though this argument has the same name.
+                socket = globals()["tmux_socket"]() or ""
+        else:
+            socket = tmux_socket
         job = Job(
             id=job_id,
             provider=provider,
@@ -130,7 +142,7 @@ class JobManager:
             prompt=prompt,
             cwd=cwd,
             tmux_session=tmux_session,
-            tmux_socket=tmux_socket() or "",
+            tmux_socket=socket,
             model=model,
             profile=profile,
             effort=effort,

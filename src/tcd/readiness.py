@@ -20,6 +20,7 @@ Two failure modes this guards against (observed with Codex):
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from math import ceil
 
 from tcd.event_log import emit
@@ -192,15 +193,26 @@ def _verify_delivery(
     *,
     event_subject: str,
     max_resends: int,
+    max_enter_retries: int,
     markers: tuple[str, ...],
     tui_ready_indicator: str | None,
     composer_placeholder: str | tuple[str, ...] | None,
     timeout_secs: float | None,
+    completion_check: Callable[[], bool] | None = None,
     event_data: dict | None = None,
 ) -> bool:
-    """Shared bounded Enter/re-send state machine for start and send."""
+    """Shared bounded delivery-confirmation state machine for start and send."""
     budget = delivery_timeout_secs(sent_text) if timeout_secs is None else timeout_secs
     extra = dict(event_data or {})
+    if completion_check is not None and completion_check():
+        emit(
+            job_id,
+            f"job.{event_subject}_confirmed",
+            attempt=0,
+            via="completion_marker",
+            **extra,
+        )
+        return True
     state = observe_delivery(
         tmux,
         session,
@@ -214,6 +226,16 @@ def _verify_delivery(
     resend_attempt = 0
 
     while True:
+        if completion_check is not None and completion_check():
+            emit(
+                job_id,
+                f"job.{event_subject}_confirmed",
+                attempt=resend_attempt,
+                via="completion_marker",
+                **extra,
+            )
+            return True
+
         if state == "running":
             attempt = enter_attempt if via == "enter" else resend_attempt
             emit(
@@ -226,7 +248,7 @@ def _verify_delivery(
             return True
 
         if state == "pasted":
-            if enter_attempt >= ENTER_RETRIES:
+            if enter_attempt >= max_enter_retries:
                 break
             enter_attempt += 1
             emit(
@@ -270,10 +292,12 @@ def verify_prompt_delivery(
     sent_text: str,
     *,
     retries: int = 2,
+    enter_retries: int = ENTER_RETRIES,
     markers: tuple[str, ...] = WORKING_MARKERS,
     tui_ready_indicator: str | None = None,
     composer_placeholder: str | tuple[str, ...] | None = None,
     timeout_secs: float | None = None,
+    completion_check: Callable[[], bool] | None = None,
 ) -> bool:
     """Confirm the agent actually started the turn; recover if it did not.
 
@@ -304,10 +328,12 @@ def verify_prompt_delivery(
         sent_text,
         event_subject="prompt",
         max_resends=max(0, retries),
+        max_enter_retries=max(0, enter_retries),
         markers=markers,
         tui_ready_indicator=tui_ready_indicator,
         composer_placeholder=composer_placeholder,
         timeout_secs=timeout_secs,
+        completion_check=completion_check,
     )
 
 
@@ -323,6 +349,9 @@ def verify_message_delivery(
     timeout_secs: float | None = None,
     req_id: str | None = None,
     turn: int | None = None,
+    max_resends: int = 1,
+    enter_retries: int = ENTER_RETRIES,
+    completion_check: Callable[[], bool] | None = None,
 ) -> bool:
     """Confirm a follow-up, allowing at most one whole-message resend."""
     event_data = {}
@@ -336,10 +365,12 @@ def verify_message_delivery(
         job_id,
         sent_text,
         event_subject="message",
-        max_resends=1,
+        max_resends=max(0, max_resends),
+        max_enter_retries=max(0, enter_retries),
         markers=markers,
         tui_ready_indicator=tui_ready_indicator,
         composer_placeholder=composer_placeholder,
         timeout_secs=timeout_secs,
+        completion_check=completion_check,
         event_data=event_data,
     )
