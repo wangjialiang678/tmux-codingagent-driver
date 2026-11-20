@@ -154,6 +154,7 @@ def observe_delivery(
     session: str,
     *,
     markers: tuple[str, ...] = WORKING_MARKERS,
+    working_check: Callable[[str], bool] | None = None,
     tui_ready_indicator: str | None = None,
     composer_placeholder: str | tuple[str, ...] | None = None,
     timeout_secs: float = 4.0,
@@ -179,8 +180,12 @@ def observe_delivery(
             continue
         if _composer_has_text(pane, tui_ready_indicator, composer_placeholder):
             return "pasted"
-        lowered_pane = pane.casefold()
-        if any(marker in lowered_pane for marker in lowered_markers):
+        if working_check is not None:
+            running = working_check(pane)
+        else:
+            lowered_pane = pane.casefold()
+            running = any(marker in lowered_pane for marker in lowered_markers)
+        if running:
             return "running"
     return "absent"
 
@@ -195,6 +200,7 @@ def _verify_delivery(
     max_resends: int,
     max_enter_retries: int,
     markers: tuple[str, ...],
+    working_check: Callable[[str], bool] | None,
     tui_ready_indicator: str | None,
     composer_placeholder: str | tuple[str, ...] | None,
     timeout_secs: float | None,
@@ -217,6 +223,7 @@ def _verify_delivery(
         tmux,
         session,
         markers=markers,
+        working_check=working_check,
         tui_ready_indicator=tui_ready_indicator,
         composer_placeholder=composer_placeholder,
         timeout_secs=budget,
@@ -276,6 +283,7 @@ def _verify_delivery(
             tmux,
             session,
             markers=markers,
+            working_check=working_check,
             tui_ready_indicator=tui_ready_indicator,
             composer_placeholder=composer_placeholder,
             timeout_secs=budget,
@@ -294,6 +302,7 @@ def verify_prompt_delivery(
     retries: int = 2,
     enter_retries: int = ENTER_RETRIES,
     markers: tuple[str, ...] = WORKING_MARKERS,
+    working_check: Callable[[str], bool] | None = None,
     tui_ready_indicator: str | None = None,
     composer_placeholder: str | tuple[str, ...] | None = None,
     timeout_secs: float | None = None,
@@ -317,6 +326,8 @@ def verify_prompt_delivery(
     text proves nothing but that the paste landed.
 
     *markers* must match the provider's own TUI (``prov.working_markers``).
+    A provider can supply *working_check* to validate the position and format
+    of its status indicator instead of matching a substring anywhere.
     Markers that never match turn this guard into a duplicate-submission bug:
     a turn that is running fine looks dropped, so the prompt is re-sent and the
     task runs more than once.
@@ -330,6 +341,7 @@ def verify_prompt_delivery(
         max_resends=max(0, retries),
         max_enter_retries=max(0, enter_retries),
         markers=markers,
+        working_check=working_check,
         tui_ready_indicator=tui_ready_indicator,
         composer_placeholder=composer_placeholder,
         timeout_secs=timeout_secs,
@@ -344,6 +356,7 @@ def verify_message_delivery(
     sent_text: str,
     *,
     markers: tuple[str, ...] = WORKING_MARKERS,
+    working_check: Callable[[str], bool] | None = None,
     tui_ready_indicator: str | None = None,
     composer_placeholder: str | tuple[str, ...] | None = None,
     timeout_secs: float | None = None,
@@ -368,6 +381,7 @@ def verify_message_delivery(
         max_resends=max(0, max_resends),
         max_enter_retries=max(0, enter_retries),
         markers=markers,
+        working_check=working_check,
         tui_ready_indicator=tui_ready_indicator,
         composer_placeholder=composer_placeholder,
         timeout_secs=timeout_secs,

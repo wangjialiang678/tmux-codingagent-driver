@@ -26,6 +26,7 @@ MODEL_RE = re.compile(r"^[a-zA-Z0-9._:/-]+$")
 EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
 REQ_RE = re.compile(r"TCD_REQ:(\S+)")
 DONE_RE = re.compile(r"^\s*[│┃┆|>❯›•]*\s*TCD_DONE:(\S+)\s*$", re.MULTILINE)
+WORKING_FOOTER_RE = re.compile(r"esc to cancel[ \t]{2,}\S[^·]* · \S.*", re.IGNORECASE)
 ACCOUNT_BANNER_RE = re.compile(
     r"^\s*[│┃┆|>❯›•]*\s*(?:signed in as|authenticated as|google account)\s*:?\s*.*$",
     re.IGNORECASE | re.MULTILINE,
@@ -139,9 +140,8 @@ class AgyProvider(Provider):
     # This marker is a footer, not an editable composer prefix.
     delivery_composer_indicator = ""
     tui_stable_secs = 2.0
-    # The real 1.5.12 run did not render a verified in-progress status string.
-    # Do not treat speculative footer text as delivery evidence.
-    working_markers: tuple[str, ...] = ()
+    # AGY 1.5.13 uses this activity hint in its footer.
+    working_markers: tuple[str, ...] = ("esc to cancel",)
     # AGY can accept a prompt even when its rendered echo does not match the
     # generic verifier. Never submit the same request again on that ambiguity.
     prompt_delivery_retries = 0
@@ -149,6 +149,16 @@ class AgyProvider(Provider):
     delivery_enter_retries = 0
     require_tui_ready = True
     supports_effort = True
+
+    def pane_looks_working(self, pane: str | None) -> bool:
+        """Recognize AGY's activity footer, including when a tool needs approval."""
+        # The hint is also likely to appear in prompt text or past responses.
+        # Check only the final nonblank row and require the right-hand status
+        # column, e.g. "esc to cancel                  auto · Gemini 4 Neon · low".
+        footer = (pane or "").rstrip().rsplit("\n", 1)[-1].lstrip()
+        return WORKING_FOOTER_RE.fullmatch(footer) is not None
+
+    delivery_activity_check = pane_looks_working
 
     def check_cli(self) -> None:
         if shutil.which(self.cli_command) is None:

@@ -10,8 +10,10 @@ import pytest
 from click.testing import CliRunner
 
 from tcd.cli import cli
+from tcd.event_log import load_events
 from tcd.job import Job, JobManager
 from tcd.providers.agy import AgyProvider
+from tcd.readiness import observe_delivery
 
 _ENV_NOT_PROVIDED = object()
 MODEL = "gemini-4-neon-medium"
@@ -251,6 +253,126 @@ def test_ambiguous_prompt_delivery_is_not_resubmitted(tcd_harness, tmp_path, mon
     saved_job = json.loads(next(jobs_dir.glob("*.json")).read_text(encoding="utf-8"))
     assert saved_job["delivery"] == "unconfirmed"
     assert saved_job["turn_count"] == 0
+
+
+def test_agy_activity_marker_must_be_in_the_live_footer_not_old_visible_text():
+    """A transcript mentioning the hotkey must not masquerade as live work."""
+    provider = AgyProvider()
+    old_turn = (
+        "Previous response: the running footer said esc to cancel\n"
+        "? for shortcuts"
+    )
+    echoed_prompt = (
+        "If the job is still active, look for esc to cancel in the footer.\n"
+        "? for shortcuts"
+    )
+    assert provider.pane_looks_working(old_turn) is False
+    assert provider.pane_looks_working(echoed_prompt) is False
+
+    class Pane:
+        def __init__(self, text):
+            self.text = text
+
+        def capture_pane(self, _session, **_kwargs):
+            return self.text
+
+    for stale_pane in (old_turn, echoed_prompt):
+        assert observe_delivery(
+            Pane(stale_pane),
+            "session",
+            markers=provider.working_markers,
+            working_check=provider.delivery_activity_check,
+            timeout_secs=0,
+        ) == "absent"
+
+
+def test_agy_working_footer_confirms_delivery_when_permission_waits(monkeypatch):
+    """A tool permission gate follows delivery; it does not mean completion."""
+    provider = AgyProvider()
+    pane = (
+        "Allow creation of this file?\n"
+        "1. Yes, allow creation\n"
+        "2. No\n"
+        "esc to cancel                  auto · Gemini 4 Neon · low"
+    )
+
+    class Pane:
+        def capture_pane(self, _session, **_kwargs):
+            return pane
+
+    monkeypatch.setattr("tcd.readiness.time.sleep", lambda *_: None)
+    assert observe_delivery(
+        Pane(),
+        "session",
+        markers=provider.working_markers,
+        working_check=provider.delivery_activity_check,
+        timeout_secs=0,
+    ) == "running"
+
+
+def test_agy_start_confirms_live_footer_without_resending_prompt(
+    tcd_harness, tmp_path, monkeypatch
+):
+    """The provider-specific footer confirms one send while the task is active."""
+    runner, tmuxes, _jobs_dir = tcd_harness
+    from tcd.readiness import verify_prompt_delivery as real_verify
+
+    live_footer = "esc to cancel                  auto · Gemini 4 Neon · medium"
+
+    def verify_with_live_footer(tmux, *args, **kwargs):
+        tmux.capture_pane = lambda *_args, **_kwargs: live_footer
+        return real_verify(tmux, *args, **kwargs)
+
+    monkeypatch.setattr("tcd.cli.verify_prompt_delivery", verify_with_live_footer)
+    monkeypatch.setattr("tcd.readiness.delivery_timeout_secs", lambda _text: 0)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    result = runner.invoke(
+        cli,
+        [
+            "start", "--provider", "agy", "--prompt", "run exactly once",
+            "--cwd", str(workspace), "--model", MODEL, "--effort", "medium", "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["delivery"] == "confirmed"
+    assert len(tmuxes) == 1
+    assert len(tmuxes[0].sent_text) == 1
+    assert not tmuxes[0].sent_enter, "a live footer needs neither a bare Enter nor a prompt resend"
+    events = load_events(payload["job_id"])
+    assert len([event for event in events if event["event"] == "job.prompt_sent"]) == 1
+    assert not [event for event in events if event["event"] == "job.prompt_resend"]
+
+
+def test_agy_live_footer_is_delivery_evidence_not_completion(
+    tmp_path, monkeypatch
+):
+    provider = AgyProvider()
+    job = Job(
+        id="liveonly1",
+        provider="agy",
+        status="running",
+        prompt="A live turn",
+        cwd=str(tmp_path),
+        tmux_session="tcd-agy-liveonly1",
+        tmux_socket="tcd-agy-liveonly1",
+        model=MODEL,
+    )
+    pane = "esc to cancel                  auto · Gemini 4 Neon · medium"
+
+    class Pane:
+        def session_exists(self, _session):
+            return True
+
+        def capture_pane(self, _session, **_kwargs):
+            return pane
+
+    monkeypatch.setattr("tcd.providers.agy.job_signal_path", lambda _job_id: tmp_path / "missing-signal")
+    monkeypatch.setattr("tcd.providers.agy._tmux_for_job", lambda _job: Pane())
+    assert provider.detect_completion(job) is None
 
 
 def test_system_proxy_credentials_are_ignored_for_subscription_session(monkeypatch):

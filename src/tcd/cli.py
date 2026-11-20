@@ -417,6 +417,7 @@ def start(
                 retries=getattr(prov, "prompt_delivery_retries", 2),
                 enter_retries=getattr(prov, "delivery_enter_retries", 3),
                 markers=getattr(prov, "working_markers", WORKING_MARKERS),
+                working_check=getattr(prov, "delivery_activity_check", None),
                 tui_ready_indicator=composer_indicator,
                 composer_placeholder=getattr(prov, "composer_placeholder", None),
                 completion_check=(
@@ -1021,6 +1022,7 @@ def send(job_id: str, message: str | None, file_path: str | None, as_json: bool)
         max_resends=getattr(prov, "message_delivery_retries", 1),
         enter_retries=getattr(prov, "delivery_enter_retries", 3),
         markers=getattr(prov, "working_markers", WORKING_MARKERS),
+        working_check=getattr(prov, "delivery_activity_check", None),
         tui_ready_indicator=composer_indicator,
         composer_placeholder=getattr(prov, "composer_placeholder", None),
         req_id=req_id,
@@ -1076,6 +1078,7 @@ def nudge(job_id: str, as_json: bool):
         tmux,
         job.tmux_session,
         markers=getattr(prov, "working_markers", WORKING_MARKERS),
+        working_check=getattr(prov, "delivery_activity_check", None),
         tui_ready_indicator=getattr(prov, "tui_ready_indicator", None),
         composer_placeholder=getattr(prov, "composer_placeholder", None),
         timeout_secs=4.0,
